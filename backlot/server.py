@@ -27,6 +27,7 @@ from backlot.state import (
     series_from_disk,
     summarize_project,
 )
+from backlot.studio_reader import read_studio_project
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 THUMB_CACHE_DIR = REPO_ROOT / ".backlot" / "thumbs"
@@ -188,6 +189,13 @@ def create_app() -> FastAPI:
     async def project_state(project_id: str) -> dict:
         project_dir = _safe_project_dir(project_id)
         return await asyncio.to_thread(load_board_state, project_dir)
+
+    @app.get("/api/project/{project_id}/studio")
+    async def studio_project(project_id: str) -> dict:
+        project_dir = _safe_project_dir(project_id)
+        return await asyncio.to_thread(
+            read_studio_project, project_dir
+        )
 
     @app.get("/api/project/{project_id}/events")
     async def project_events(project_id: str, request: Request) -> StreamingResponse:

@@ -1,0 +1,11 @@
+# OpenMontage Studio — profil de dépenses dédié.
+# Aucun service externe payant sans approbation explicite par projet.
+budget:
+  mode: cap
+  total_usd: 0.0
+  reserve_pct: 0.10
+  single_action_approval_usd: 0.0
+  require_approval_for_new_paid_tool: true
+
+studio:
+  free_external_allowlist: []

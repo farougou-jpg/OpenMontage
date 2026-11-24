@@ -14,6 +14,8 @@ This skill teaches you to run discovery, classify the user's setup, present capa
 
 **Skip onboarding** when the user arrives with a specific, actionable request (e.g., "Make a 60-second explainer about black holes"). Go directly to Rule Zero.
 
+**OpenMontage Studio (français) :** si le message est le formulaire « OPENMONTAGE — STUDIO DE CRÉATION » ou une demande de création via le studio, utiliser le pipeline `studio-fr` : lire `studio/README.md` puis `skills/pipelines/studio-fr/executive-producer.md` (formulaire vide → demander l'idée avant tout).
+
 ## Reference Video Entry Point
 
 When the user provides a **video URL or local video file as inspiration** — for example:

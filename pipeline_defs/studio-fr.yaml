@@ -1,0 +1,202 @@
+name: studio-fr
+version: "1.0"
+description: >
+  OpenMontage Studio en français (phase 1) : une idée saisie dans le formulaire du studio
+  devient une vidéo 16:9 en motion design avec narration Piper locale. Mode économique
+  (0 €) par défaut ; mode hybride présenté mais jamais activé sans devis ni autorisation.
+  Recherche web désactivée par défaut. Validation du scénario puis du storyboard avant
+  toute génération.
+category: generated
+stability: beta
+
+default_checkpoint_policy: guided
+
+extensions:
+  custom_scripts: false
+  custom_playbooks: false
+  custom_skills: false
+  custom_tools: false
+
+required_skills:
+  - pipelines/studio-fr/executive-producer
+  - pipelines/studio-fr/idea-director
+  - meta/studio-creative-router
+  - pipelines/studio-fr/proposal-director
+  - pipelines/studio-fr/script-director
+  - pipelines/studio-fr/scene-director
+  - pipelines/studio-fr/asset-director
+  - pipelines/explainer/edit-director
+  - pipelines/explainer/compose-director
+  - pipelines/studio-fr/publish-director
+  - meta/reviewer
+  - meta/checkpoint-protocol
+
+orchestration:
+  mode: executive-producer
+  skill: pipelines/studio-fr/executive-producer
+  budget_default_usd: 0.0
+  max_revisions_per_stage: 3
+  max_send_backs: 3
+  max_wall_time_minutes: 30
+
+compatible_playbooks:
+  recommended:
+    - clean-professional
+    - flat-motion-graphics
+  also_works:
+    - premium-minimalist
+    - minimalist-diagram
+  custom_allowed: false
+
+metadata:
+  studio_phase: 1
+  language: fr
+  formats: ["16:9"]
+  resolution: "1920x1080"
+  durations_seconds: [15, 30, 60, 90]
+  default_mode: economique
+  default_composition_mode: gabarits
+  default_render_runtime: remotion
+  web_research_default: false
+  budget_guard: lib/studio/budget_guard.py
+  studio_tools:
+    - studio_piper_fr_narration   # lib/studio/narration (hors registre automatique)
+    - studio_export               # lib/studio/publish.exporter_video (seul chemin de publication)
+  remotion_config: remotion-composer/remotion.fr-locale-v4.config.ts   # v4 = v3 + StatCard (Space Grotesk)
+
+stages:
+  - name: idea
+    skill: pipelines/studio-fr/idea-director
+    produces:
+      - brief
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - Formulaire vérifié par lib/studio/capabilities.check_request
+      - Aucune recherche web sans demande explicite de l'utilisateur
+      - Valeurs par défaut annoncées à l'utilisateur
+    success_criteria:
+      - Schema-valid brief en français
+
+  - name: proposal
+    skill: pipelines/studio-fr/proposal-director
+    required_artifacts_in:
+      - brief
+    produces:
+      - proposal_packet
+      - decision_log
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: true
+    review_focus:
+      - Modes économique ET hybride présentés, économique sélectionné par défaut
+      - Méthodes gabarits ET atelier présentées, gabarits recommandés
+      - Remotion ET HyperFrames présentés (render_runtime_selection)
+      - Devis calculé par le garde-fou, 0 € par défaut
+    success_criteria:
+      - Schema-valid proposal_packet avec 2 ou 3 concepts
+      - decision_log avec pipeline_selection, composition_mode, render_runtime_selection, budget_tradeoff
+
+  - name: script
+    skill: pipelines/studio-fr/script-director
+    required_artifacts_in:
+      - proposal_packet
+    produces:
+      - script
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: true
+    review_focus:
+      - Chaque phrase tient dans sa fenêtre (mode mesure, aucun fichier audio)
+      - Tous les textes à l'écran et la narration complète présentés à l'utilisateur
+    success_criteria:
+      - Schema-valid script, durée totale égale à la durée validée
+
+  - name: scene_plan
+    skill: pipelines/studio-fr/scene-director
+    required_artifacts_in:
+      - script
+    optional_artifacts_in:
+      - proposal_packet
+    produces:
+      - scene_plan
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: true
+    review_focus:
+      - Storyboard complet, scènes couvrant toute la durée
+      - Types de scènes existants (gabarits) ou art direction écrite (atelier)
+    success_criteria:
+      - Schema-valid scene_plan
+
+  - name: assets
+    skill: pipelines/studio-fr/asset-director
+    required_artifacts_in:
+      - scene_plan
+      - script
+    produces:
+      - asset_manifest
+    tools_available:
+      - audio_probe
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - Narration produite par studio_piper_fr_narration via StudioBudgetGuard
+      - Rapport de contrôle narration conforme (-16 LUFS, true peak <= -1,5 dBFS)
+    success_criteria:
+      - Schema-valid asset_manifest, coût total 0
+
+  - name: edit
+    skill: pipelines/explainer/edit-director
+    required_artifacts_in:
+      - asset_manifest
+      - scene_plan
+    produces:
+      - edit_decisions
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - Parole finie au moins 0,5 s avant chaque fondu sortant
+    success_criteria:
+      - Schema-valid edit_decisions
+
+  - name: compose
+    skill: pipelines/explainer/compose-director
+    required_artifacts_in:
+      - edit_decisions
+      - asset_manifest
+    produces:
+      - render_report
+    tools_available:
+      - video_compose
+      - hyperframes_compose
+      - audio_mixer
+      - subtitle_gen
+      - remotion_caption_burn
+      - composition_validator
+      - visual_qa
+      - audio_probe
+      - frame_sampler
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - Rendu 1920x1080 avec remotion.fr-locale-v4.config.ts (gabarits)
+      - Contrôle qualité visuel et sonore
+    success_criteria:
+      - Schema-valid render_report, MP4 1920x1080
+
+  - name: publish
+    skill: pipelines/studio-fr/publish-director
+    required_artifacts_in:
+      - render_report
+    produces:
+      - publish_log
+    tools_available: []   # export via lib/studio/publish.exporter_video (metadata.studio_tools)
+    checkpoint_required: true
+    human_approval_default: true
+    review_focus:
+      - Validation finale par l'utilisateur
+    success_criteria:
+      - Schema-valid publish_log

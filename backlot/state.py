@@ -13,6 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
+from backlot.project_metadata import read_project_metadata
 from lib.events import read_events
 from lib.paths import PROJECTS_DIR, REPO_ROOT  # single source of truth (env-overridable)
 
@@ -407,9 +408,55 @@ def _build_storyboard(
 ) -> Optional[dict]:
     """Scene cards: scene_plan × script × asset_manifest (+ live events)."""
     scene_plan = artifacts.get("scene_plan")
-    if not scene_plan or not isinstance(scene_plan.get("scenes"), list):
-        return None
     sections = (artifacts.get("script") or {}).get("sections") or []
+    if not scene_plan or not isinstance(scene_plan.get("scenes"), list):
+        # Read-only compatibility path for historical Studio projects. These
+        # files are descriptive production records, not Backlot checkpoints.
+        legacy_files = sorted((project_dir / "storyboard").glob("v*/storyboard.json"))
+        legacy_path = None
+        legacy = None
+        for candidate in reversed(legacy_files):
+            candidate_data = _read_json(candidate)
+            if candidate_data and isinstance(candidate_data.get("scenes"), list):
+                legacy_path, legacy = candidate, candidate_data
+                break
+        if legacy is None or legacy_path is None:
+            return None
+        legacy_scenes = legacy.get("scenes") or []
+        cards = []
+        for scene in legacy_scenes:
+            if not isinstance(scene, dict):
+                continue
+            sid = str(scene.get("id")) if scene.get("id") is not None else ""
+            start, end = scene.get("start"), scene.get("end")
+            image_path = scene.get("image")
+            resolved_image = _resolve_asset_path(
+                project_dir, str(Path("storyboard") / legacy_path.parent.name / image_path)
+            ) if image_path else None
+            visual = None
+            if resolved_image is not None:
+                visual = {
+                    "id": f"legacy_storyboard_{sid}", "type": "image",
+                    "scene_id": sid, "path": _rel(project_dir, resolved_image),
+                    "exists": True, "renderable": True, "snapshot": True,
+                }
+            section = next((item for item in sections if item.get("id") == sid), None)
+            narration = scene.get("narration") or ((section or {}).get("text"))
+            cards.append({
+                "id": sid, "type": scene.get("type"),
+                "description": scene.get("screen_text"),
+                "start_seconds": start, "end_seconds": end,
+                "duration_seconds": max(0, end - start) if isinstance(start, (int, float)) and isinstance(end, (int, float)) else None,
+                "hero_moment": False, "shot_language": None, "shot_intent": None,
+                "framing": None, "movement": None, "narration": narration,
+                "section_label": (section or {}).get("label"),
+                "required_assets": [], "visual": visual,
+                "takes": [visual] if visual else [], "audio": [],
+                "generating": False, "generating_tool": None,
+                "transition": scene.get("transition"), "frame": scene.get("frame"),
+            })
+        total = max((c["end_seconds"] for c in cards if isinstance(c.get("end_seconds"), (int, float))), default=None)
+        return {"scenes": cards, "total_duration_seconds": total, "style_playbook": legacy.get("style")}
     manifest_assets = (artifacts.get("asset_manifest") or {}).get("assets") or []
 
     def scene_key(value: Any) -> str:
@@ -515,34 +562,65 @@ def _scan_media(project_dir: Path) -> dict[str, list[dict]]:
     renders: list[dict] = []
     snapshots: list[dict] = []
     music: list[dict] = []
+    audio: list[dict] = []
 
-    renders_dir = project_dir / "renders"
-    if renders_dir.is_dir():
-        for f in sorted(renders_dir.iterdir()):
-            if f.suffix.lower() in MEDIA_VIDEO_EXT and f.is_file():
-                renders.append({"path": _rel(project_dir, f), "size": f.stat().st_size,
-                                "mtime": f.stat().st_mtime})
+    # Historical Studio projects keep media one or two levels below versioned
+    # directories (renders/v001, exports/v001/video). Scan those trees without
+    # following symlinks or entering dependency/cache directories.
+    for dirname in ("renders", "exports"):
+        media_root = project_dir / dirname
+        if media_root.is_dir():
+            for f in sorted(media_root.rglob("*")):
+                if not f.is_file() or f.suffix.lower() not in MEDIA_VIDEO_EXT:
+                    continue
+                try:
+                    if any(part in SCAN_EXCLUDE for part in f.relative_to(project_dir).parts):
+                        continue
+                    renders.append({"path": _rel(project_dir, f), "size": f.stat().st_size,
+                                    "mtime": f.stat().st_mtime, "source": dirname})
+                except OSError:
+                    continue
     # Atelier heuristic: deliverables at project root.
     for f in sorted(project_dir.glob("*.mp4")):
         renders.append({"path": _rel(project_dir, f), "size": f.stat().st_size,
                         "mtime": f.stat().st_mtime, "at_root": True})
     for f in sorted(project_dir.glob("*.mp3")):
         music.append({"path": _rel(project_dir, f), "at_root": True})
-    music_dir = project_dir / "assets" / "music"
-    if music_dir.is_dir():
-        for f in sorted(music_dir.iterdir()):
-            if f.suffix.lower() in MEDIA_AUDIO_EXT:
-                music.append({"path": _rel(project_dir, f)})
+    # Audio is exposed separately from music so narration and sound effects
+    # remain discoverable without changing the existing music field contract.
+    assets_dir = project_dir / "assets"
+    if assets_dir.is_dir():
+        for f in sorted(assets_dir.rglob("*")):
+            if not f.is_file() or f.suffix.lower() not in MEDIA_AUDIO_EXT:
+                continue
+            try:
+                rel = _rel(project_dir, f)
+                if any(part in SCAN_EXCLUDE for part in f.relative_to(project_dir).parts):
+                    continue
+                kind = "music" if "music" in f.relative_to(project_dir).parts else (
+                    "narration" if "narration" in f.relative_to(project_dir).parts else "audio"
+                )
+                audio.append({"path": rel, "size": f.stat().st_size, "type": kind})
+                if kind == "music":
+                    music.append({"path": rel})
+            except OSError:
+                continue
 
-    for dirname in ("snapshots", "verify"):
+    for dirname in ("snapshots", "verify", "storyboard"):
         d = project_dir / dirname
         if d.is_dir():
-            for f in sorted(d.iterdir()):
-                if f.suffix.lower() in MEDIA_IMAGE_EXT and f.is_file():
+            for f in sorted(d.rglob("*")):
+                if not f.is_file() or f.suffix.lower() not in MEDIA_IMAGE_EXT:
+                    continue
+                try:
+                    if any(part in SCAN_EXCLUDE for part in f.relative_to(project_dir).parts):
+                        continue
                     snapshots.append({"path": _rel(project_dir, f)})
+                except OSError:
+                    continue
 
     renders.sort(key=lambda r: r.get("mtime", 0), reverse=True)
-    return {"renders": renders, "snapshots": snapshots, "music": music}
+    return {"renders": renders, "snapshots": snapshots, "music": music, "audio": audio}
 
 
 def _find_poster(project_dir: Path, state: dict) -> Optional[str]:
@@ -601,14 +679,17 @@ def load_board_state(project_dir: Path) -> dict[str, Any]:
     project_dir = Path(project_dir)
     project_id = project_dir.name
 
+    # Shared read-only metadata normalization: supports Backlot, Studio and
+    # hybrid projects without changing checkpoint or progress derivation.
+    project_metadata = read_project_metadata(project_dir)
     marker = _read_json(project_dir / "project.json") or {}
     meta_json = _read_json(project_dir / "meta.json") or {}
 
     checkpoints = _collect_checkpoints(project_dir)
     history = _collect_history(project_dir)
 
-    pipeline_type = marker.get("pipeline_type")
-    if not pipeline_type:
+    pipeline_type = project_metadata["pipeline_type"]
+    if not pipeline_type or pipeline_type == "unknown":
         for cp in checkpoints.values():
             pt = cp.get("pipeline_type")
             if pt and pt != "unknown":
@@ -650,12 +731,17 @@ def load_board_state(project_dir: Path) -> dict[str, Any]:
 
     state: dict[str, Any] = {
         "project_id": project_id,
-        "title": marker.get("title") or meta_json.get("name") or project_id.replace("-", " ").title(),
+        "title": (
+            marker.get("title")
+            or (project_metadata["title"] if project_metadata["source_format"] != "unknown" else None)
+            or meta_json.get("name")
+            or project_metadata["title"]
+        ),
         "pipeline": pipeline_meta,
         "style_playbook": marker.get("style_playbook"),
         "series": _series_of(marker),
-        "created_at": marker.get("created_at"),
-        "has_marker": bool(marker),
+        "created_at": project_metadata["created_at"],
+        "has_marker": project_metadata["has_marker"],
         "has_pipeline_state": bool(checkpoints),
         "stages": stages,
         "artifacts": artifacts,

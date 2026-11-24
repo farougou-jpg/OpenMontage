@@ -47,7 +47,13 @@ def test_trace_matches_the_actual_terminal_scene_cursor():
     ]
     # Execute the production cursor loop, including its ceil and JS text.length.
     script = "const steps=" + json.dumps(steps) + "; const fps=30; const accentColor='blue';" + layout + "console.log(JSON.stringify({lines,pills,cursorFrame}));"
-    rendered = json.loads(subprocess.check_output([node, "-e", script], text=True))
+    rendered = json.loads(
+        subprocess.check_output(
+            [node, "-e", script],
+            text=True,
+            encoding="utf-8",
+        )
+    )
     actual_starts = [line["startFrame"] for line in rendered["lines"]] + [rendered["pills"][0]["startFrame"]]
     assert [lm.video_time for lm in trace(steps, quiet=True)] == [round(frame / 30, 2) for frame in actual_starts]
     assert sum(step_duration(step, 30) for step in steps) == pytest.approx(rendered["cursorFrame"] / 30)

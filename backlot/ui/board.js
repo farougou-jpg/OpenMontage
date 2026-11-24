@@ -15,6 +15,7 @@ const player = document.getElementById("player");
 const THEME_KEY = "backlot.theme";
 let currentTheme = localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
 let state = null;
+let studioData = null; // Read-only Studio projection; independent from Backlot pipeline state.
 let selectedStage = null;   // stage drawer open for this stage name
 let activeRender = 0;
 let replay = null;          // {t0, t1, t, playing} — replay mode when non-null
@@ -891,6 +892,161 @@ function renderAwaitingNotice(s) {
       "The agent is paused at this gate — reply ", el("b", {}, "in chat"), " to approve or request changes."));
 }
 
+
+// ---------------------------------------------------------------------------
+// Studio read-only projection
+// ---------------------------------------------------------------------------
+
+function studioFileData(file) {
+  if (!file || typeof file !== "object") return null;
+  return file.data && typeof file.data === "object" ? file.data : file;
+}
+
+function studioList(value) {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === "object") {
+    if (Array.isArray(value.items)) return value.items;
+    if (Array.isArray(value.versions)) return value.versions;
+    if (Array.isArray(value.entries)) return value.entries;
+  }
+  return [];
+}
+
+function studioMetric(label, value) {
+  return el("div", { class: "studio-metric" },
+    el("span", {}, label),
+    el("strong", {}, value == null ? "—" : String(value)));
+}
+
+function studioRecordRow(title, detail, status) {
+  const statusText = status == null ? "" : String(status);
+  const statusClass = /valid|conform|approved|complete|success/i.test(statusText) ? "ok"
+    : /reject|error|fail|block/i.test(statusText) ? "bad"
+    : statusText ? "pending" : "";
+  return el("div", { class: "studio-row" },
+    el("div", { class: "studio-row-copy" },
+      el("strong", {}, title || "Élément sans titre"),
+      detail ? el("p", {}, detail) : null),
+    statusText ? el("span", { class: `studio-status ${statusClass}` }, statusText) : null);
+}
+
+function renderStudioPanel() {
+  const payload = studioData;
+  if (!payload || typeof payload !== "object") return null;
+
+  const summary = payload.summary && typeof payload.summary === "object" ? payload.summary : {};
+  const scriptFile = studioFileData(payload.script);
+  const validationsFile = studioFileData(payload.validations);
+  const scriptSections = studioList(scriptFile && scriptFile.sections);
+  const validations = studioList(validationsFile && validationsFile.validations);
+  const storyboards = studioList(payload.storyboards || payload.storyboard_versions);
+  const renders = studioList(payload.renders || payload.render_versions);
+  const qcReports = studioList(payload.qc_reports || payload.quality_reports);
+
+  const panel = el("section", { class: "studio-panel" });
+  panel.append(
+    el("div", { class: "studio-panel-head" },
+      el("div", {},
+        el("span", { class: "studio-eyebrow" }, "OPENMONTAGE STUDIO"),
+        el("h2", {}, "Données de production")),
+      el("span", { class: "studio-readonly" }, "LECTURE SEULE")),
+  );
+
+  const metrics = el("div", { class: "studio-metrics" },
+    studioMetric("Sections du script", summary.script_section_count ?? scriptSections.length),
+    studioMetric("Versions storyboard", summary.storyboard_version_count ?? storyboards.length),
+    studioMetric("Versions rendu", summary.render_version_count ?? renders.length),
+    studioMetric("Rapports qualité", summary.qc_report_count ?? qcReports.length),
+    studioMetric("Validations", summary.studio_validation_count ?? validations.length));
+  panel.append(metrics);
+
+  const columns = el("div", { class: "studio-columns" });
+
+  const scriptCard = el("section", { class: "studio-card" },
+    el("h3", {}, "Script"),
+    el("p", { class: "studio-muted" },
+      scriptFile ? (scriptFile.valid === false ? "Fichier présent, mais invalide" : "script.json") : "Aucun script détecté"));
+  if (scriptSections.length) {
+    for (const [index, section] of scriptSections.entries()) {
+      const label = section.label || section.id || `Section ${index + 1}`;
+      const timing = section.start_seconds != null || section.end_seconds != null
+        ? `${fmtDuration(section.start_seconds)} – ${fmtDuration(section.end_seconds)}` : "";
+      scriptCard.append(studioRecordRow(label, [timing, section.text].filter(Boolean).join(" · ")));
+    }
+  } else if (scriptFile && scriptFile.title) {
+    scriptCard.append(studioRecordRow(scriptFile.title, scriptFile.total_duration_seconds != null
+      ? `Durée : ${fmtDuration(scriptFile.total_duration_seconds)}` : ""));
+  }
+  columns.append(scriptCard);
+
+  const validationCard = el("section", { class: "studio-card" },
+    el("h3", {}, "Validations humaines"),
+    el("p", { class: "studio-muted" }, "Décisions enregistrées dans validations.json"));
+  if (validations.length) {
+    for (const [index, item] of validations.entries()) {
+      validationCard.append(studioRecordRow(
+        item.objet || item.object || item.label || `Validation ${item.numero || index + 1}`,
+        item.details && typeof item.details === "object"
+          ? Object.entries(item.details).map(([k, v]) => `${humanize(k)} : ${typeof v === "string" ? v : JSON.stringify(v)}`).join(" · ")
+          : (item.details || item.date_utilisateur || item.enregistre_le || ""),
+        item.statut || item.status));
+    }
+  } else {
+    validationCard.append(el("p", { class: "studio-muted" }, "Aucune validation détaillée disponible."));
+  }
+  columns.append(validationCard);
+
+  const versionsCard = el("section", { class: "studio-card" },
+    el("h3", {}, "Storyboards et rendus"));
+  for (const [index, item] of storyboards.entries()) {
+    if (!item) continue;
+    const data = studioFileData(item) || item;
+    versionsCard.append(studioRecordRow(
+      data.title || item.version || item.path || `Storyboard ${index + 1}`,
+      [data.style, data.format, data.duration || data.duree].filter(Boolean).join(" · "),
+      item.valid === false ? "invalide" : (item.valid === true ? "valide" : "")));
+  }
+  for (const [index, item] of renders.entries()) {
+    if (!item) continue;
+    const path = typeof item === "string" ? item : (item.path || item.file || "");
+    const title = path ? path.split("/").pop() : `Rendu ${index + 1}`;
+    const row = studioRecordRow(title, path, item.valid === false ? "invalide" : "");
+    if (path) {
+      const link = el("a", { class: "studio-media-link", href: mediaURL(projectId, path), target: "_blank", rel: "noopener" }, "Ouvrir le fichier");
+      row.append(link);
+    }
+    versionsCard.append(row);
+  }
+  if (!storyboards.length && !renders.length) {
+    versionsCard.append(el("p", { class: "studio-muted" }, "Aucune version détectée."));
+  }
+  columns.append(versionsCard);
+
+  const qcCard = el("section", { class: "studio-card" },
+    el("h3", {}, "Contrôle qualité"));
+  if (qcReports.length) {
+    for (const [index, item] of qcReports.entries()) {
+      if (!item) continue;
+      const data = studioFileData(item) || item;
+      const title = data.projet || data.project || item.path || `Rapport QC ${index + 1}`;
+      const conforms = data.conforme ?? data.conform;
+      const status = conforms === true ? "conforme" : conforms === false ? "non conforme" : "";
+      const detail = [
+        item.path,
+        data.bloquants != null ? `${data.bloquants} blocage(s)` : null,
+        data.avertissements != null ? `${data.avertissements} avertissement(s)` : null,
+      ].filter(Boolean).join(" · ");
+      qcCard.append(studioRecordRow(title, detail, status));
+    }
+  } else {
+    qcCard.append(el("p", { class: "studio-muted" }, "Aucun rapport qualité détecté."));
+  }
+  columns.append(qcCard);
+
+  panel.append(columns);
+  return panel;
+}
+
 // ---------------------------------------------------------------------------
 // replay — scrub a completed run from its timestamps
 // ---------------------------------------------------------------------------
@@ -1101,6 +1257,8 @@ function render() {
       if (section) app.append(section);
     }
   }
+  const studioPanel = renderStudioPanel();
+  if (studioPanel) app.append(studioPanel);
 }
 
 // Defensive normalization (F-02): the server contract guarantees these
@@ -1130,7 +1288,13 @@ function normalize(s) {
 }
 
 async function refresh() {
-  state = normalize(await getJSON(`/api/project/${encodeURIComponent(projectId)}/state`));
+  const id = encodeURIComponent(projectId);
+  const [boardState, studioState] = await Promise.all([
+    getJSON(`/api/project/${id}/state`),
+    getJSON(`/api/project/${id}/studio`).catch(() => null),
+  ]);
+  state = normalize(boardState);
+  studioData = studioState;
   render();
 }
 

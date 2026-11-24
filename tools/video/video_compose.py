@@ -1149,7 +1149,7 @@ class VideoCompose(BaseTool):
             "final_review_status": final_review.get("status"),
         }
 
-        if final_review.get("status") == "fail":
+        if final_review.get("status") != "pass":
             return ToolResult(
                 success=False,
                 error=(
@@ -1797,7 +1797,7 @@ class VideoCompose(BaseTool):
             render_result.data["final_review_status"] = final_review["status"]
 
             # If the self-review says fail, downgrade the ToolResult
-            if final_review["status"] == "fail":
+            if final_review["status"] != "pass":
                 return ToolResult(
                     success=False,
                     error=(
@@ -1929,7 +1929,7 @@ class VideoCompose(BaseTool):
                 render_result.data = {}
             render_result.data["final_review"] = final_review
             render_result.data["final_review_status"] = final_review["status"]
-            if final_review["status"] == "fail":
+            if final_review["status"] != "pass":
                 return ToolResult(
                     success=False,
                     error=(
@@ -1989,7 +1989,7 @@ class VideoCompose(BaseTool):
                 render_result.data = {}
             render_result.data["final_review"] = final_review
             render_result.data["final_review_status"] = final_review["status"]
-            if final_review["status"] == "fail":
+            if final_review["status"] != "pass":
                 return ToolResult(
                     success=False,
                     error=(

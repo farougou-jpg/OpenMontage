@@ -6,6 +6,7 @@ Loads and validates pipeline YAML manifests from pipeline_defs/.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional
 
@@ -37,13 +38,15 @@ def _load_pipeline_cached(name: str, defs_dir_key: str) -> dict[str, Any]:
 
 
 def load_pipeline_readonly(name: str, defs_dir: Optional[Path] = None) -> dict[str, Any]:
-    """Load a manifest through a cache. The result MUST NOT be mutated.
+    """Load a manifest through a cache and return an isolated copy.
 
     Manifests are immutable within a run; hot paths (gate checks on every
     checkpoint write, board state derivation) should use this instead of
     re-parsing YAML + re-validating the schema each call.
     """
-    return _load_pipeline_cached(name, str(defs_dir) if defs_dir else "")
+    # Never expose the cached mutable object to callers. A defensive copy keeps
+    # one caller's edits from contaminating subsequent pipeline reads.
+    return deepcopy(_load_pipeline_cached(name, str(defs_dir) if defs_dir else ""))
 
 
 def load_pipeline(name: str, defs_dir: Optional[Path] = None) -> dict[str, Any]:
