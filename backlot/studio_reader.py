@@ -1,8 +1,15 @@
 """Read-only reader for OpenMontage Studio project artifacts."""
 from __future__ import annotations
 import json
+import re
 from pathlib import Path
 from typing import Any
+
+# Studio versions are exactly "vNNN" (same rule as lib/studio/project.py VERSION_RE).
+_VERSION_RE = re.compile(r"v\d{3}")
+_AUDIO_EXT = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"}
+_VIDEO_EXT = {".mp4", ".webm", ".mov", ".mkv"}
+_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 def _read_json(path: Path):
@@ -31,8 +38,23 @@ def _version_dirs(parent: Path):
     if not parent.is_dir():
         return []
     return sorted((p for p in parent.iterdir()
-                   if p.is_dir() and p.name.startswith("v")),
+                   if p.is_dir() and _VERSION_RE.fullmatch(p.name)),
                   key=lambda p: p.name)
+
+
+def _files(folder: Path, root: Path, extensions: set[str]) -> list[str]:
+    """Direct files of `folder` with one of `extensions`, as project-relative paths."""
+    if not folder.is_dir():
+        return []
+    return [
+        p.relative_to(root).as_posix()
+        for p in sorted(folder.iterdir())
+        if p.is_file() and p.suffix.lower() in extensions
+    ]
+
+
+def _optional_file(path: Path, root: Path):
+    return path.relative_to(root).as_posix() if path.is_file() else None
 
 
 def _read_storyboard_version(folder: Path, root: Path):
@@ -73,6 +95,34 @@ def _read_render_version(folder: Path, root: Path):
     }
 
 
+def _read_narration_version(folder: Path, root: Path):
+    """Narration files of assets/narration/vNNN, reported as stored (no verdict derived)."""
+    return {
+        "version": folder.name,
+        "audio": _files(folder, root, _AUDIO_EXT),
+        "segments": _files(folder / "segments", root, _AUDIO_EXT),
+        "timing": _json_file(folder / "timing_fr.json", root),
+        "report": _json_file(folder / "controle" / "rapport_narration.json", root),
+        "report_markdown": _optional_file(folder / "controle" / "rapport_narration.md", root),
+    }
+
+
+def _read_export_version(folder: Path, root: Path):
+    """Export package of exports/vNNN, reported as stored (no verdict derived)."""
+    control = folder / "controle"
+    return {
+        "version": folder.name,
+        "videos": _files(folder / "video", root, _VIDEO_EXT),
+        "thumbnails": _files(folder / "thumbnails", root, _IMAGE_EXT),
+        "metadata": _json_file(folder / "metadata" / "metadata.json", root),
+        "description": _optional_file(folder / "metadata" / "description.txt", root),
+        "publication_qc": _json_file(folder / "publication_qc.json", root),
+        "qc_reports": [
+            _json_file(p, root) for p in sorted(control.glob("*.json")) if p.is_file()
+        ] if control.is_dir() else [],
+    }
+
+
 def read_studio_project(project_dir: Path) -> dict[str, Any]:
     """Read Studio JSON and artifact indexes; never write or derive progress."""
     root = Path(project_dir).resolve()
@@ -86,6 +136,14 @@ def read_studio_project(project_dir: Path) -> dict[str, Any]:
     renders = [
         _read_render_version(p, root)
         for p in _version_dirs(root / "renders")
+    ]
+    narrations = [
+        _read_narration_version(p, root)
+        for p in _version_dirs(root / "assets" / "narration")
+    ]
+    exports = [
+        _read_export_version(p, root)
+        for p in _version_dirs(root / "exports")
     ]
 
     qc_reports = []
@@ -114,10 +172,14 @@ def read_studio_project(project_dir: Path) -> dict[str, Any]:
         "validation_items": validation_items,
         "storyboard_versions": storyboards,
         "render_versions": renders,
+        "narration_versions": narrations,
+        "export_versions": exports,
         "qc_reports": qc_reports,
         "summary": {
             "storyboard_version_count": len(storyboards),
             "render_version_count": len(renders),
+            "narration_version_count": len(narrations),
+            "export_version_count": len(exports),
             "video_count": sum(len(v["videos"]) for v in renders),
             "qc_report_count": len(qc_reports),
             "script_section_count": len(sections),

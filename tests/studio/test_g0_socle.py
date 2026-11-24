@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -200,6 +201,98 @@ def test_pilot_and_french_videos_locked_and_read_only():
     with pytest.raises(prj.ProjectLockedError):
         exp.export_package(PILOT, "x.mp4", "T")
     assert tree(PILOT) == before
+
+
+# ---- état d'avancement : validité actuelle, ancien format, date d'activité ----
+
+def test_state_distinguishes_historical_validation_from_current_validity(tmp_path):
+    p, _ = validated_until_narration(tmp_path)
+    steps = prj.project_state(p)["etapes"]
+    for name in ("scenario", "storyboard", "narration"):
+        assert steps[name]["statut"] == "fait"
+        assert steps[name]["a_jour"] is True and steps[name]["verification"] == "à jour"
+    for name in ("projet", "rendu", "controle", "validation_rendu", "export"):
+        assert steps[name]["a_jour"] is None and steps[name]["verification"] is None
+    assert "origine" not in steps["narration"]
+
+    (p / "script.json").write_bytes((p / "script.json").read_bytes() + b" ")
+    steps = prj.project_state(p)["etapes"]
+    # La validation reste inscrite (historique) mais n'est plus valide aujourd'hui.
+    assert steps["scenario"]["statut"] == "fait" and steps["scenario"]["a_jour"] is False
+    assert "modifié depuis la validation 1" in steps["scenario"]["verification"]
+    assert steps["storyboard"]["a_jour"] is True
+
+
+def test_pilot_legacy_sound_reference_shown_as_narration_without_changing_rules():
+    before = tree(PILOT)
+    steps = prj.project_state(PILOT)["etapes"]
+    assert steps["narration"]["statut"] == "fait" and "ancien format" in steps["narration"]["origine"]
+    # Validations historiques sans empreintes : jamais présentées comme vérifiées.
+    for name in ("scenario", "storyboard", "narration", "validation_rendu"):
+        assert steps[name]["a_jour"] is False and "sans empreintes" in steps[name]["verification"]
+    # Règles inchangées : aucune validation « narration » n'est créée ni reconnue.
+    assert "narration" not in val.validations_by_kind(PILOT)
+    assert val.is_current(PILOT, "narration") == (False, "narration française non validé")
+    assert tree(PILOT) == before
+
+
+def test_last_modified_includes_latest_versioned_folders_only(tmp_path):
+    p = new_project(tmp_path)
+    for f in (p / "studio_project.json", p / "validations.json"):
+        os.utime(f, (1_000_000, 1_000_000))
+    (p / "storyboard" / "v001").mkdir(parents=True)
+    (p / "storyboard" / "v002").mkdir()
+    (p / "storyboard" / "brouillon").mkdir()                 # non versionné : ignoré
+    os.utime(p / "storyboard" / "v001", (3_000_000, 3_000_000))
+    os.utime(p / "storyboard" / "v002", (2_000_000, 2_000_000))
+    os.utime(p / "storyboard" / "brouillon", (4_000_000, 4_000_000))
+    os.utime(p / "storyboard", (4_000_000, 4_000_000))
+    from datetime import datetime, timezone
+    expected = datetime.fromtimestamp(2_000_000, timezone.utc).isoformat()   # dernière version = v002
+    assert prj.project_state(p)["modifie_le"] == expected
+
+
+# ---- utilitaires du socle ----
+
+def test_check_slug_accepts_valid_identifiers():
+    for slug in ("abc", "pub-30s", "a1-b2-c3", "x" * 61):
+        assert prj.check_slug(slug) == slug
+
+
+def test_versions_and_latest_version_keep_only_vnnn_folders(tmp_path):
+    root = tmp_path / "renders"
+    assert prj.versions(root) == [] and prj.latest_version(root) is None
+    for name in ("v002", "v010", "v001", "v1", "v0001", "essais"):
+        (root / name).mkdir(parents=True)
+    (root / "v003").write_bytes(b"fichier, pas un dossier")
+    assert prj.versions(root) == ["v001", "v002", "v010"]
+    assert prj.latest_version(root) == "v010"
+
+
+def test_is_studio_project_identity_and_legacy_fallback(tmp_path):
+    assert prj.is_studio_project(new_project(tmp_path, "projet-neuf"))
+    legacy = tmp_path / "ancien"
+    legacy.mkdir()
+    prj.write_json(legacy / "validations.json", {"projet": "ancien", "pipeline": "studio-fr", "validations": []})
+    assert prj.is_studio_project(legacy)                      # ancien format, sans marqueur
+    other = tmp_path / "autre"
+    other.mkdir()
+    prj.write_json(other / "validations.json", {"projet": "ancien", "pipeline": "studio-fr", "validations": []})
+    assert not prj.is_studio_project(other)                   # nom de dossier différent
+    prj.write_json(other / "validations.json", {"projet": "autre", "pipeline": "explainer", "validations": []})
+    assert not prj.is_studio_project(other)                   # autre pipeline
+    assert not prj.is_studio_project(tmp_path / "absent")
+
+
+def test_mark_studio_project_never_creates_identity(tmp_path):
+    from lib.studio.qc.tool import mark_studio_project
+    p = new_project(tmp_path)
+    assert mark_studio_project(p) == p.resolve() / "studio_project.json"
+    bare = tmp_path / "sans-identite"
+    bare.mkdir()
+    with pytest.raises(prj.ProjectLockedError, match="Identité Studio absente"):
+        mark_studio_project(bare)
+    assert list(bare.iterdir()) == []
 
 
 # ---- validations ----

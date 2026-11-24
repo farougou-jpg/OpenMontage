@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from lib.paths import PROJECTS_DIR
-from lib.studio.narration.tool import PROJECTS_ROOT, PROTECTED, check_write_zone
+from lib.studio.narration.tool import PROTECTED, check_write_zone
 from lib.studio.qc.tool import STUDIO_MARKER
 from lib.studio.storyboard.stills import FR_CONFIG_V4
 
@@ -43,6 +43,14 @@ DEFAULTS = {
 }
 
 STEPS = ("projet", "scenario", "storyboard", "narration", "rendu", "controle", "validation_rendu", "export")
+# Étapes rattachées à une validation de l'utilisateur (type inscrit dans validations.json).
+VALIDATED_STEPS = {"scenario": "scenario", "storyboard": "storyboard", "narration": "narration",
+                   "validation_rendu": "rendu"}
+# Projets antérieurs au module (pilote) : leur validation 3 porte sur la référence sonore,
+# affichée comme narration faite. Lecture seule : aucune règle de validation n'en dépend.
+LEGACY_NARRATION_KIND = "reference_sonore"
+# Dossiers versionnés (vNNN) dont la dernière version date l'activité du projet.
+VERSIONED_DIRS = ("storyboard", "assets/narration", "renders", "controle", "exports")
 
 
 class ProjectError(ValueError):
@@ -227,8 +235,41 @@ def _validation_kinds(project_dir: Path) -> dict[str, dict]:
     return validations_by_kind(project_dir)
 
 
+def _current_check(project_dir: Path, kind: Optional[str]) -> tuple[Optional[bool], Optional[str]]:
+    """Validité ACTUELLE d'une validation (fichiers inchangés), distincte de son existence.
+
+    `None` si l'étape n'a pas de validation enregistrée ; sinon le verdict de `is_current`.
+    Lecture seule ; une erreur de lecture vaut « pas à jour ».
+    """
+    if kind is None:
+        return None, None
+    from lib.studio.validations import is_current
+    try:
+        return is_current(project_dir, kind)
+    except OSError as exc:
+        return False, f"vérification impossible : {exc}"
+
+
+def _last_modified(p: Path) -> Optional[str]:
+    """Dernière activité : fichiers du projet et dernière version de chaque dossier versionné."""
+    files = [p / STUDIO_MARKER, p / "validations.json", p / "script.json", p / "events.jsonl"]
+    latest = [p / d / v for d in VERSIONED_DIRS if (v := latest_version(p / d))]
+    mtimes = []
+    for f in files + latest:
+        try:
+            if f.exists():
+                mtimes.append(f.stat().st_mtime)
+        except OSError:
+            continue
+    return datetime.fromtimestamp(max(mtimes), timezone.utc).isoformat() if mtimes else None
+
+
 def project_state(project_dir: Path) -> dict:
-    """État d'avancement déduit des fichiers (lecture seule)."""
+    """État d'avancement déduit des fichiers (lecture seule).
+
+    Pour chaque étape validée, `a_jour` dit si les fichiers validés sont INCHANGÉS
+    aujourd'hui (`is_current`) : une validation historique n'est pas une validité actuelle.
+    """
     p = Path(project_dir)
     meta = read_json(p / STUDIO_MARKER, {}) or {}
     vals = read_json(p / "validations.json", {}) or {}
@@ -236,6 +277,8 @@ def project_state(project_dir: Path) -> dict:
     sb, nar = latest_version(p / "storyboard"), latest_version(p / "assets" / "narration")
     ren, qc, exp = latest_version(p / "renders"), latest_version(p / "controle"), latest_version(p / "exports")
     qc_report = read_json(p / "controle" / qc / "rapport_qc.json", {}) if qc else {}
+    narration_kind = ("narration" if "narration" in kinds
+                      else LEGACY_NARRATION_KIND if LEGACY_NARRATION_KIND in kinds else None)
 
     def step(done: bool, started: bool, detail: str) -> dict:
         return {"statut": "fait" if done else ("en_cours" if started else "a_faire"), "detail": detail}
@@ -245,25 +288,29 @@ def project_state(project_dir: Path) -> dict:
         "scenario": step("scenario" in kinds, (p / "script.json").is_file(),
                          "validé" if "scenario" in kinds else ("brouillon" if (p / "script.json").is_file() else "")),
         "storyboard": step("storyboard" in kinds, bool(sb), sb or ""),
-        "narration": step("narration" in kinds, bool(nar), nar or ""),
+        "narration": step(narration_kind is not None, bool(nar), nar or ""),
         "rendu": step(bool(ren), bool(ren), ren or ""),
         "controle": step(bool(qc_report.get("conforme") is True), bool(qc),
                          ("conforme" if qc_report.get("conforme") is True else "non conforme") if qc else ""),
         "validation_rendu": step("rendu" in kinds, False, "validé" if "rendu" in kinds else ""),
         "export": step(bool(exp and (p / "exports" / exp / "publication_qc.json").is_file()), bool(exp), exp or ""),
     }
+    for name, s in steps.items():
+        kind = narration_kind if name == "narration" else VALIDATED_STEPS.get(name)
+        kind = kind if kind in kinds else None
+        s["a_jour"], s["verification"] = _current_check(p, kind)
+    if narration_kind == LEGACY_NARRATION_KIND:
+        steps["narration"]["origine"] = "référence sonore (ancien format, affichée comme narration)"
     # Une production exportée est terminée (le pilote, antérieur au module, n'a pas toutes les
     # validations au nouveau format : il reste affiché tel quel, en lecture seule).
     exported = steps["export"]["statut"] == "fait"
     next_step = None if exported else next((s for s in STEPS if steps[s]["statut"] != "fait"), None)
-    mtimes = [f.stat().st_mtime for f in (p / STUDIO_MARKER, p / "validations.json", p / "script.json",
-                                          p / "events.jsonl") if f.is_file()]
     return {
         "projet": p.name, "chemin": str(p), "titre": steps["projet"]["detail"],
         "verrouille": is_locked(p), "raison_verrou": lock_reason(p),
         "etapes": steps, "prochaine_etape": next_step, "termine": next_step is None,
         "validations": sorted(kinds), "reglages": project_settings(p),
-        "modifie_le": datetime.fromtimestamp(max(mtimes), timezone.utc).isoformat() if mtimes else None,
+        "modifie_le": _last_modified(p),
     }
 
 
