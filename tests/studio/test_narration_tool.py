@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 import wave
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from lib.studio.budget_guard import StudioBudgetGuard
 from lib.studio.narration.synth import Synth
 from lib.studio.narration.tool import (
     PROJECTS_ROOT,
+    PROTECTED,
     PUBLIC_STUDIO_ROOT,
     REPO_ROOT,
     PathPolicyError,
@@ -85,6 +88,102 @@ def test_outside_repo_only_temp_allowed(tmp_path):
     assert check_write_zone(tmp_path / "p", PROJECTS_ROOT)
     with pytest.raises(PathPolicyError):
         check_write_zone(Path.home() / "Documents" / "pub-test", PROJECTS_ROOT)
+
+
+# ---- Test 6 bis : liens symboliques ----
+# Les liens sont créés uniquement dans tmp_path ; leurs cibles ne sont jamais écrites,
+# check_write_zone() se contente de les résoudre.
+
+_WINERROR_PRIVILEGE_NOT_HELD = 1314
+
+
+def _remove_dir_link(link: Path) -> None:
+    """Supprime le lien lui-même, jamais le contenu de sa cible."""
+    if os.name == "nt":
+        os.rmdir(link)  # lien symbolique de répertoire ou jonction : retire seulement le point d'analyse
+    else:
+        os.unlink(link)
+
+
+@pytest.fixture
+def dir_link():
+    """Fabrique de liens de répertoire, avec nettoyage garanti (même si le test échoue).
+
+    1. Lien symbolique réel (os.symlink).
+    2. Sous Windows, si le privilège manque (WinError 1314 : ni mode développeur, ni
+       SeCreateSymbolicLinkPrivilege), repli sur une jonction NTFS (`mklink /J`), qui
+       ne demande aucun privilège et que Path.resolve() suit de la même façon.
+    3. Si les deux échouent : pytest.skip avec le motif précis de chaque échec.
+    """
+    created: list[Path] = []
+
+    def make(link: Path, target: Path) -> Path:
+        try:
+            os.symlink(target, link, target_is_directory=True)
+        except NotImplementedError as exc:
+            pytest.skip(f"liens symboliques non pris en charge : {exc}")
+        except OSError as exc:
+            if getattr(exc, "winerror", None) != _WINERROR_PRIVILEGE_NOT_HELD:
+                pytest.skip(f"création de lien symbolique impossible : {exc}")
+            proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                                  capture_output=True, text=True, errors="replace")
+            if proc.returncode != 0 or not os.path.lexists(link):
+                pytest.skip(f"lien symbolique refusé ({exc}) et jonction NTFS impossible "
+                            f"(code {proc.returncode}) : {(proc.stderr or proc.stdout).strip()}")
+        created.append(link)
+        # Le lien doit être résolu vers sa destination réelle, sinon le test ne prouverait rien.
+        assert link.resolve() == Path(target).resolve(), (link, link.resolve(), target)
+        return link
+
+    yield make
+
+    errors = []
+    for link in reversed(created):
+        try:
+            if os.path.lexists(link):
+                _remove_dir_link(link)
+        except OSError as exc:
+            errors.append(f"{link} : {exc}")
+    assert not errors, "nettoyage des liens incomplet : " + " ; ".join(errors)
+
+
+@pytest.mark.parametrize("protected", PROTECTED, ids=lambda p: p.name)
+def test_symlink_to_protected_zone_is_rejected(tmp_path, protected, dir_link):
+    if not protected.is_dir():
+        pytest.skip(f"zone protégée absente sur cette machine : {protected}")
+    link = dir_link(tmp_path / "raccourci", protected)
+    target = link / "v999" / "narration_fr.wav"
+    # Sans résolution, le chemin serait accepté (dossier temporaire) : c'est bien le lien qui est jugé.
+    assert not str(target).startswith(str(protected))
+    for allowed_root in (PROJECTS_ROOT, PUBLIC_STUDIO_ROOT, tmp_path):
+        with pytest.raises(PathPolicyError, match="protégée"):
+            check_write_zone(target, allowed_root)
+    assert not (protected / "v999").exists()
+
+
+def test_symlink_escape_from_studio_root_is_rejected(tmp_path, dir_link):
+    studio_root = tmp_path / "studio"
+    studio_root.mkdir()
+    for name, outside in (("evasion_lib", REPO_ROOT / "lib"), ("evasion_depot", REPO_ROOT)):
+        link = dir_link(studio_root / name, outside)
+        target = link / "x.wav"
+        # Le chemin écrit est lexicalement dans la zone autorisée...
+        assert target.parent.parent == studio_root
+        # ...mais sa cible réelle en sort : refus.
+        with pytest.raises(PathPolicyError, match="Hors de la zone studio"):
+            check_write_zone(target, studio_root)
+    assert not (REPO_ROOT / "lib" / "x.wav").exists()
+    assert not (REPO_ROOT / "x.wav").exists()
+
+
+def test_symlink_within_allowed_zone_is_accepted(tmp_path, dir_link):
+    studio_root = tmp_path / "studio"
+    real = studio_root / "projet-reel"
+    real.mkdir(parents=True)
+    link = dir_link(studio_root / "alias", real)
+    result = check_write_zone(link / "assets" / "narration", studio_root)
+    assert result == real.resolve() / "assets" / "narration"
+    assert result.is_relative_to(studio_root.resolve())
 
 
 def test_versions_never_overwrite(tmp_path):
