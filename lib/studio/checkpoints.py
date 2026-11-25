@@ -16,6 +16,16 @@
 
 Un checkpoint écrit directement par `write_checkpoint` n'a pas de trace : `verify_studio_checkpoints`
 le signale et `write_studio_checkpoint` refuse toute étape suivante tant qu'il subsiste.
+
+Lot P0-E :
+- R4 — trace v2 : `decision_log_ref` est fixé par le wrapper avant l'écriture et inclus dans
+  l'empreinte ; il doit désigner le `decision_log.json` du projet ; l'empreinte SHA-256 de chaque
+  décision présente au moment de l'écriture est enregistrée, et chaque relecture vérifie qu'elle est
+  toujours là, inchangée (les décisions ajoutées ensuite restent permises). Les traces v1 restent
+  vérifiées selon leurs règles v1.
+- R3 — une tentative annulée ne laisse aucune fausse version : les copies d'historique créées par
+  CETTE tentative sont déplacées (jamais supprimées) vers `history/annulations/`, avec un journal ;
+  un échec de déplacement est signalé.
 """
 
 from __future__ import annotations
@@ -23,6 +33,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -38,6 +49,10 @@ STAGE_VALIDATION = {"script": "scenario", "scene_plan": "storyboard", "assets": 
 FROZEN_STAGES = {"publish": "publication gelée pour studio-fr jusqu'au lot P0-D et à l'autorisation "
                             "explicite de l'utilisateur"}
 LIFECYCLE = ("awaiting_human", "completed")
+TRACE_VERSION = 2                       # P0-E (R4) ; les traces v1 restent vérifiées selon leurs règles
+DECISION_LOG = "decision_log.json"      # = lib.checkpoint._decision_log_path(...).name
+CANCELLED_DIR = "annulations"           # history/annulations/ : copies des tentatives annulées (R3)
+CANCELLED_JOURNAL = "annulations.jsonl"
 
 
 class CheckpointIntegrityError(ProjectError):
@@ -64,9 +79,80 @@ def _normalized(artifacts: Any) -> Any:
     return data
 
 
-def artifacts_sha256(artifacts: Any) -> str:
-    canon = json.dumps(_normalized(artifacts), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+def _canonical_sha256(data: Any) -> str:
+    canon = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def artifacts_sha256(artifacts: Any, version: int = TRACE_VERSION) -> str:
+    """Empreinte des artefacts : v2 couvre tout (y compris `decision_log_ref`) ; v1 l'excluait."""
+    return _canonical_sha256(_normalized(artifacts) if version == 1 else artifacts)
+
+
+# ---- journal des décisions (P0-E, R4) ----
+
+def _ref_holders(artifacts: Any) -> list[dict]:
+    """Objets où `write_checkpoint` inscrit `decision_log_ref` (même règle que lib.checkpoint)."""
+    holders: list[dict] = []
+    if not isinstance(artifacts, dict):
+        return holders
+    pp = artifacts.get("proposal_packet")
+    if isinstance(pp, dict) and isinstance(pp.get("production_plan"), dict):
+        holders.append(pp["production_plan"])
+    if isinstance(artifacts.get("render_report"), dict):
+        holders.append(artifacts["render_report"])
+    return holders
+
+
+def _decisions_after_merge(p: Path, artifacts: dict) -> list:
+    """Décisions que `decision_log.json` contiendra après l'écriture (fusion de lib.checkpoint)."""
+    path = p / DECISION_LOG
+    existing = read_json(path) if path.exists() else {"decisions": []}
+    if not isinstance(existing, dict) or not isinstance(existing.get("decisions", []), list):
+        raise CheckpointIntegrityError("decision_log.json illisible : écriture refusée")
+    decisions = list(existing.get("decisions") or [])
+    new_log = artifacts.get("decision_log")
+    if isinstance(new_log, dict):
+        known = {d.get("decision_id") for d in decisions if isinstance(d, dict)}
+        decisions += [d for d in new_log.get("decisions") or [] if isinstance(d, dict)
+                      and d.get("decision_id") not in known]
+    return decisions
+
+
+def _decision_prints(decisions: list) -> list[list[str]]:
+    return [[str(d.get("decision_id")), _canonical_sha256(d)] for d in decisions if isinstance(d, dict)]
+
+
+def _check_decisions(p: Path, stage: str, cp: dict, trace: dict) -> list[str]:
+    """Trace v2 : référence du journal et décisions enregistrées toujours présentes et inchangées."""
+    problems: list[str] = []
+    artifacts = cp.get("artifacts") if isinstance(cp.get("artifacts"), dict) else {}
+    for holder in _ref_holders(artifacts):
+        if "decision_log_ref" not in holder:
+            if isinstance(artifacts.get("decision_log"), dict):
+                problems.append(f"checkpoint {stage} : decision_log_ref absent")
+            continue
+        ref = holder.get("decision_log_ref")
+        ref_path = Path(ref) if isinstance(ref, str) and ref else None
+        if ref_path is None or ref_path.name != DECISION_LOG or ref_path.parent.name != p.name:
+            problems.append(f"checkpoint {stage} : decision_log_ref ne désigne pas le {DECISION_LOG} du projet")
+    recorded = trace.get("decisions")
+    if not isinstance(recorded, list):
+        return problems + [f"checkpoint {stage} : empreintes des décisions absentes (trace v2)"]
+    if not recorded:
+        return problems
+    current = read_json(p / DECISION_LOG)
+    if not isinstance(current, dict) or not isinstance(current.get("decisions"), list):
+        return problems + [f"checkpoint {stage} : {DECISION_LOG} absent ou illisible"]
+    prints: dict[str, set] = {}
+    for decision_id, fp in _decision_prints(current["decisions"]):
+        prints.setdefault(decision_id, set()).add(fp)
+    for item in recorded:
+        if (not isinstance(item, list) or len(item) != 2
+                or item[1] not in prints.get(str(item[0]), set())):
+            problems.append(f"checkpoint {stage} : décision {item[0] if isinstance(item, list) and item else '?'} "
+                            "modifiée ou supprimée depuis l'écriture")
+    return problems
 
 
 # ---- liaison artefact ↔ validation / production ----
@@ -201,8 +287,13 @@ def _check_one(p: Path, stage: str, cp: Any, chained: bool) -> list[str]:
     if (trace.get("etape") != stage or cp.get("stage") != stage or cp.get("pipeline_type") != PIPELINE
             or cp.get("project_id") != p.name or trace.get("statut") != cp.get("status")):
         problems.append(f"checkpoint {stage} : identité incohérente avec sa trace")
-    if artifacts_sha256(cp.get("artifacts")) != trace.get("artefacts_sha256"):
+    version = trace.get("version", 1)
+    if version not in (1, 2):
+        return problems + [f"checkpoint {stage} : version de trace inconnue ({version!r})"]
+    if artifacts_sha256(cp.get("artifacts"), version) != trace.get("artefacts_sha256"):
         problems.append(f"checkpoint {stage} : artefact modifié après écriture (empreinte SHA-256 différente)")
+    if version >= 2:
+        problems += _check_decisions(p, stage, cp, trace)
     ref, kind = trace.get("validation"), STAGE_VALIDATION.get(stage)
     if kind and cp.get("status") == "completed":
         entries = [e for e in load(p)["validations"] if isinstance(e, dict)]
@@ -265,6 +356,43 @@ def _restore(path: Path, previous: Optional[bytes]) -> Optional[str]:
     return None
 
 
+def _history_files(history: Path, stage: str) -> set[str]:
+    return {f.name for f in history.glob(f"checkpoint_{stage}_*.json") if f.is_file()} if history.is_dir() else set()
+
+
+def _set_aside_cancelled_copies(history: Path, stage: str, before: set[str], reason: BaseException) -> list[str]:
+    """R3 : déplace (jamais ne supprime) vers history/annulations/ les copies créées par CETTE tentative."""
+    created = sorted(_history_files(history, stage) - before)
+    if not created:
+        return []
+    problems: list[str] = []
+    dest = history / CANCELLED_DIR
+    try:
+        dest.mkdir(exist_ok=True)
+    except OSError as exc:
+        return [f"history/{CANCELLED_DIR} non créé ({exc}) : copies laissées dans history/ : {', '.join(created)}"]
+    moved: list[str] = []
+    not_moved: list[str] = []
+    for name in created:
+        target, n = dest / name, 1
+        while target.exists():
+            target, n = dest / f"{Path(name).stem}_{n}{Path(name).suffix}", n + 1
+        try:
+            (history / name).rename(target)
+            moved.append(target.name)
+        except OSError as exc:
+            not_moved.append(name)
+            problems.append(f"copie d'historique {name} non déplacée vers {CANCELLED_DIR} ({exc})")
+    try:
+        entry = {"date": datetime.now(timezone.utc).isoformat(), "etape": stage, "copies": moved,
+                 "non_deplacees": not_moved, "motif": f"{type(reason).__name__}: {reason}"[:1000]}
+        with open(dest / CANCELLED_JOURNAL, "a", encoding="utf-8", newline="\n") as journal:
+            journal.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        problems.append(f"journal history/{CANCELLED_DIR}/{CANCELLED_JOURNAL} non écrit ({exc})")
+    return problems
+
+
 def write_studio_checkpoint(project_dir: Path, stage: str, status: str, artifacts: dict, *,
                             human_approved: bool = False, review: Optional[dict] = None,
                             cost_snapshot: Optional[dict] = None, error: Optional[str] = None,
@@ -289,11 +417,18 @@ def write_studio_checkpoint(project_dir: Path, stage: str, status: str, artifact
             raise CheckpointIntegrityError(f"Checkpoint « {stage} » refusé : checkpoints précédents non fiables",
                                            problems)
         reference = _bind(p, stage, status, artifacts, human_approved)
-    metadata[INTEGRITY_KEY] = {"version": 1, "ecrit_par": WRITER, "etape": stage, "statut": status,
-                               "artefacts_sha256": artifacts_sha256(artifacts), "validation": reference}
+    # R4 : valeur exacte que write_checkpoint inscrira (même calcul que lib.checkpoint), figée et couverte.
+    if isinstance(artifacts.get("decision_log"), dict):
+        for holder in _ref_holders(artifacts):
+            holder["decision_log_ref"] = str(p.parent / p.name / DECISION_LOG)
+    metadata[INTEGRITY_KEY] = {"version": TRACE_VERSION, "ecrit_par": WRITER, "etape": stage, "statut": status,
+                               "artefacts_sha256": artifacts_sha256(artifacts), "validation": reference,
+                               "decisions": _decision_prints(_decisions_after_merge(p, artifacts))}
 
-    target, decisions = p / f"checkpoint_{stage}.json", p / "decision_log.json"
+    target, decisions = p / f"checkpoint_{stage}.json", p / DECISION_LOG
     before = {target: _snapshot(target), decisions: _snapshot(decisions)}
+    history = p / "history"
+    history_before = _history_files(history, stage)            # R3 : historique avant la tentative
     try:
         path = ckpt.write_checkpoint(p.parent, p.name, stage, status, artifacts, pipeline_type=PIPELINE,
                                      style_playbook=style_playbook, human_approved=human_approved,
@@ -304,6 +439,7 @@ def write_studio_checkpoint(project_dir: Path, stage: str, status: str, artifact
             raise CheckpointIntegrityError(f"Checkpoint « {stage} » incohérent après écriture : annulé", problems)
     except BaseException as exc:
         failed = [m for m in (_restore(f, b) for f, b in before.items()) if m]
+        failed += _set_aside_cancelled_copies(history, stage, history_before, exc)
         if failed:
             if not isinstance(exc, Exception):
                 exc.add_note("Restauration incomplète : " + " ; ".join(failed))
