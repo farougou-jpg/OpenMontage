@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from lib.studio.project import (PIPELINE, ProjectError, _atomic_write_bytes, latest_version, read_json,
-                                require_writable)
+                                require_writable, versions)
 from lib.studio.validations import OBJECTS, is_current, load, validations_by_kind
 
 INTEGRITY_KEY = "studio_integrity"
@@ -105,6 +105,16 @@ def _storyboard_cuts(p: Path, version: Optional[str]) -> list[tuple]:
     return _signature(props.get("cuts"), "id", "in_seconds", "out_seconds")
 
 
+def _declared_storyboard_version(p: Path, artifacts: Any) -> Optional[str]:
+    """`scene_plan.metadata.storyboard_version` (P0-D, R5) : None si absent, refus si inconnu."""
+    sp = artifacts.get("scene_plan") if isinstance(artifacts, dict) else None
+    meta = sp.get("metadata") if isinstance(sp, dict) else None
+    declared = meta.get("storyboard_version") if isinstance(meta, dict) else None
+    if declared is not None and (not isinstance(declared, str) or declared not in versions(p / "storyboard")):
+        raise CheckpointIntegrityError(f"scene_plan.metadata.storyboard_version inconnue : {declared!r}")
+    return declared
+
+
 def _bind(p: Path, stage: str, status: str, artifacts: dict, human_approved: bool) -> Optional[dict]:
     """Vérifie que l'artefact est exactement ce qui a été validé / produit. Renvoie la référence de validation."""
     completed = status == "completed"
@@ -120,10 +130,19 @@ def _bind(p: Path, stage: str, status: str, artifacts: dict, human_approved: boo
         if artifacts.get("script") != on_disk or on_disk is None:
             raise CheckpointIntegrityError("Artefact `script` différent de script.json (contenu validé/présenté)")
     elif stage in ("scene_plan", "edit"):
+        # P0-D (R5) : la version du storyboard présentée est déclarée dans le scene_plan et doit être
+        # celle utilisée ici ; en `completed`, elle doit être la version validée (validation 2).
+        declared = _declared_storyboard_version(p, artifacts) if stage == "scene_plan" else None
         if stage == "edit" or completed:
             version = _current(p, "storyboard").get("version")
+            if declared is not None and declared != version:
+                raise CheckpointIntegrityError(f"scene_plan présenté sur le storyboard {declared}, "
+                                               f"version validée : {version}")
         else:
-            version = latest_version(p / "storyboard")
+            if declared is None:
+                raise CheckpointIntegrityError("scene_plan en attente d'accord : "
+                                               "metadata.storyboard_version (version présentée) obligatoire")
+            version = declared
         cuts = _storyboard_cuts(p, version)
         if stage == "scene_plan":
             got = _signature((artifacts.get("scene_plan") or {}).get("scenes"), "id", "start_seconds", "end_seconds")
@@ -193,12 +212,23 @@ def _check_one(p: Path, stage: str, cp: Any, chained: bool) -> list[str]:
         elif (match[0].get("type") != kind
               or match[0].get("empreinte_presentation") != ref.get("empreinte_presentation")):
             problems.append(f"checkpoint {stage} : validation de référence différente")
+        elif stage == "scene_plan" and _declared_version_mismatch(p, cp, match[0]):
+            problems.append(f"checkpoint {stage} : storyboard présenté différent de la version validée")
         elif chained:
             latest = validations_by_kind(p).get(kind) or {}
             ok, why = is_current(p, kind)
             if latest.get("numero") != ref.get("numero") or not ok:
                 problems.append(f"checkpoint {stage} : validation remplacée ou périmée ({why})")
     return problems
+
+
+def _declared_version_mismatch(p: Path, cp: dict, entry: dict) -> bool:
+    """P0-D (R5) : la version déclarée par le scene_plan diffère de celle de la validation 2."""
+    try:
+        declared = _declared_storyboard_version(p, cp.get("artifacts"))
+    except CheckpointIntegrityError:
+        return True
+    return declared is not None and declared != entry.get("version")
 
 
 def verify_studio_checkpoints(project_dir: Path, before_stage: Optional[str] = None) -> list[str]:

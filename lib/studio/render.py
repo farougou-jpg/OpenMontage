@@ -48,6 +48,18 @@ class RenderPlan:
     notes: list[str] = field(default_factory=list)
 
 
+def _require_trusted_checkpoints(p: Path) -> None:
+    """P0-D (R1) : aucun composant Studio n'avance sur un checkpoint non vérifié.
+
+    Un checkpoint écrit hors `write_studio_checkpoint`, modifié après écriture ou lié à une
+    validation remplacée n'est jamais considéré comme intègre : le rendu et le contrôle sont refusés.
+    """
+    from lib.studio.checkpoints import verify_studio_checkpoints
+    problems = verify_studio_checkpoints(p)
+    if problems:
+        raise RenderError("Refusé : checkpoints Studio non fiables (" + " ; ".join(problems) + ").")
+
+
 def render_command(props_path: Path, out_mp4: Path, config: str) -> list[str]:
     return [shutil.which("node") or "node", str(REMOTION_CLI), "render", ENTRY, COMPOSITION, str(out_mp4),
             f"--props={props_path}", f"--config={check_config(config)}", f"--browser-executable={CHROME}",
@@ -58,6 +70,7 @@ def prepare_render(project_dir: Path, studio_audio_root: Path = PUBLIC_STUDIO_RO
     """Vérifie les validations 2 et 3 (à jour) et prépare les props. N'écrit rien."""
     p = Path(project_dir)
     require_writable(p)
+    _require_trusted_checkpoints(p)
     for kind in ("storyboard", "narration"):
         ok, why = is_current(p, kind)
         if not ok:
@@ -101,6 +114,7 @@ def run_render(plan: RenderPlan, runner: Optional[Runner] = None, on_line: Calla
     if runner is None and not renderer_available():
         raise RenderError("Rendu local indisponible (Remotion, navigateur local ou Node absent).")
     p = require_writable(plan.project_dir)
+    _require_trusted_checkpoints(p)
     renders = check_write_zone(p / "renders", PROJECTS_ROOT)
     cancel = cancel or threading.Event()
     out = next_version_dir(renders)
@@ -170,6 +184,7 @@ def check_render(project_dir: Path, render_version: str, tool: Any = None, title
     """Contrôle qualité automatique du rendu (outil du lot 1.6, via le garde-fou). Renvoie le ToolResult."""
     from lib.studio.qc import QualityControlTool
     p = require_writable(Path(project_dir))
+    _require_trusted_checkpoints(p)
     r = p / "renders" / render_version
     info = read_json(r / "rendu.json")
     if not isinstance(info, dict):

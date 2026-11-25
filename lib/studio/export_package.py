@@ -42,6 +42,10 @@ def check_file_name(name: str) -> str:
 def export_package(project_dir: Path, file_name: str, title: str, description: str = "",
                    exporter: Optional[Callable[..., ToolResult]] = None) -> dict:
     p = require_writable(Path(project_dir))
+    from lib.studio.checkpoints import verify_studio_checkpoints   # P0-D (R1)
+    problems = verify_studio_checkpoints(p)
+    if problems:
+        raise ExportError("Export refusé : checkpoints Studio non fiables (" + " ; ".join(problems) + ").")
     check_file_name(file_name)
     ok, why = is_current(p, "rendu")
     if not ok:

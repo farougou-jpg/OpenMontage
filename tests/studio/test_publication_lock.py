@@ -36,8 +36,26 @@ def _inventory() -> dict[str, str]:
     return {str(p.relative_to(PROJECTS)): _sha(p) for p in sorted(PROJECTS.rglob("*")) if p.is_file()}
 
 
+def _approve(project: Path, kind: str, **refs) -> dict:
+    """Validation humaine selon le protocole P0-B (artefact présenté, empreinte, accord cité)."""
+    from lib.studio import validations as val
+    shown = val.presentation(project, kind, **refs)
+    common = {"empreinte_presentee": shown["empreinte"], "accord_utilisateur": "Oui, je valide."}
+    if kind == "scenario":
+        return val.validate_script(project, **common)
+    if kind == "storyboard":
+        return val.validate_storyboard(project, refs["version"], **common)
+    if kind == "narration":
+        return val.validate_narration(project, refs["version"], refs["studio_audio_root"], **common)
+    return val.validate_render(project, refs["render_version"], refs["qc_version"], **common)
+
+
 @pytest.fixture(scope="module")
 def env(tmp_path_factory):
+    """Projet Studio passé par la vraie chaîne (P0-D) : validations 1 à 3, rendu par render.py
+    (runner simulé : copie du MP4 validé, aucun rendu réel), contrôle qualité réel, validation 4."""
+    from lib.studio import render as ren
+    from lib.studio.storyboard.stills import FR_CONFIG_V4
     inv_before = _inventory()
     original_sha = _sha(paths("code-to-screen")["mp4"])
     root = tmp_path_factory.mktemp("publication")
@@ -48,18 +66,37 @@ def env(tmp_path_factory):
         "studio": "OpenMontage Studio", "version": 1, "projet": project.name,
         "pipeline": "studio-fr"
     }), encoding="utf-8")
-    render_dir = project / "renders" / "v001"
-    render_dir.mkdir(parents=True)
-    mp4 = render_dir / "final.mp4"
-    shutil.copy2(code["mp4"], mp4)
-    sb = _storyboard_from_mp4({**code, "mp4": mp4}, root / "sb")
+    script = script_from_timing(code["timing"], 30)
+    (project / "script.json").write_text(json.dumps(script, ensure_ascii=False), encoding="utf-8")
+    _approve(project, "scenario")
+    sb = _storyboard_from_mp4(code, project / "storyboard" / "v001")
+    sb_json = json.loads((sb / "storyboard.json").read_text(encoding="utf-8"))
+    (sb / "storyboard.json").write_text(json.dumps({**sb_json, "configuration_rendu": FR_CONFIG_V4},
+                                                   ensure_ascii=False), encoding="utf-8")
+    (sb / "props_storyboard.json").write_text(json.dumps(code["props"], ensure_ascii=False), encoding="utf-8")
+    _approve(project, "storyboard", version="v001")
+    audio = root / "audio_studio"
+    nar = project / "assets" / "narration" / "v001"
+    (nar / "controle").mkdir(parents=True)
+    (nar / "narration_fr.wav").write_bytes(b"RIFF-narration-de-reference")
+    (nar / "timing_fr.json").write_text(json.dumps(code["timing"], ensure_ascii=False), encoding="utf-8")
+    (nar / "controle" / "rapport_narration.json").write_text(json.dumps({"conforme": True, "profil": "B"}),
+                                                             encoding="utf-8")
+    (audio / project.name / "v001").mkdir(parents=True)
+    shutil.copy2(nar / "narration_fr.wav", audio / project.name / "v001" / "narration_fr.wav")
+    _approve(project, "narration", version="v001", studio_audio_root=audio)
+
+    def copy_runner(cmd, cwd, on_line, cancel):          # aucun rendu réel : copie du MP4 validé
+        shutil.copy2(code["mp4"], cmd[5])
+        return 0
+    rendered = ren.run_render(ren.prepare_render(project, studio_audio_root=audio), runner=copy_runner)
+    mp4 = Path(rendered["mp4"])
     base = {"mp4": str(mp4), "props": code["props"], "timing": code["timing"], "project_dir": str(project),
-            "storyboard_dir": str(sb), "script": script_from_timing(code["timing"], 30)}
-    (render_dir / "rendu.json").write_text(json.dumps({
-        "mp4": mp4.name, "sha256": _sha(mp4), "taille_octets": mp4.stat().st_size
-    }), encoding="utf-8")
+            "storyboard_dir": str(sb), "script": script}
     qc_ok = QualityControlTool().execute(base)
     assert publication_allowed(qc_ok), qc_ok.data.get("bloquants")
+    _approve(project, "rendu", render_version=rendered["version"],
+             qc_version=Path(qc_ok.data["version_dir"]).name)
     shifted = copy.deepcopy(code["timing"])
     for r in shifted:
         r["fin"] += 0.5
@@ -337,10 +374,10 @@ def test_B_republication_after_lock_uses_only_the_immutable_render(env):
     render_dir = env["project"] / "renders" / "v001"
     # Le rapport QC de référence est lié au même contenu ; la republication
     # crée une nouvelle version sans toucher aux sources ni au rendu.
-    second = exporter_video(env["qc_ok"], render_dir / "final.mp4", "Pilote", env["project"])
+    second = exporter_video(env["qc_ok"], render_dir / env["mp4"].name, "Pilote", env["project"])
     assert second.success, second.error
     assert Path(second.data["version_dir"]).name > Path(first.data["version_dir"]).name
-    assert _sha(render_dir / "final.mp4") == env["sha"]
+    assert _sha(render_dir / env["mp4"].name) == env["sha"]
 
 
 def test_B_locked_project_refuses_republication_from_unmanaged_mp4(env, tmp_path):

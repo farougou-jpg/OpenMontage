@@ -74,3 +74,8 @@ val.validate_storyboard(project_dir, "vNNN", empreinte_presentee=shown["empreint
 
 Un nouveau rendu du storyboard crée une nouvelle version `vNNN` : la présenter et obtenir
 un nouvel accord ; l'empreinte d'une autre version est refusée.
+
+Lot P0-D : le `scene_plan` déclare la version présentée, `"metadata": {"storyboard_version": "vNNN"}`,
+la même que celle de `val.presentation` et de `val.validate_storyboard`. Le checkpoint
+(`ckp.write_studio_checkpoint`) compare ses scènes à CETTE version ; en `completed`, elle doit être
+la version validée. Toute divergence est refusée.

@@ -4,6 +4,9 @@
 d'exception : tout doute renvoie un refus (`ToolResult(success=False)`).
 
 Étapes :
+0. (P0-D) validation 4 à jour sur le MP4 exact et le contrôle qu'elle cite, provenance `render.py`
+   vérifiable, checkpoints Studio intègres — aucune publication sans validation humaine finale,
+   y compris en appel direct ;
 1. contrôle qualité conforme ET empreinte SHA-256 du MP4 identique (volet A) ;
 2. vérification du manifeste du rendu versionné et de son empreinte ;
 3. export versionné `projects/<projet>/exports/vNNN/` via le garde-fou (volet A),
@@ -69,6 +72,38 @@ def _is_immutable_render(project_dir: Path, video: Path) -> bool:
         return False
 
 
+def _final_validation_covers(project_dir: Path, video: Path, qc_result: Any) -> tuple[bool, str]:
+    """P0-D (R2, R1) : validation 4 à jour sur le MP4 exact et le contrôle qu'elle cite ; checkpoints intègres.
+
+    Exige : aucun écart d'intégrité des checkpoints Studio ; validation 4 (`rendu`) à jour ; le MP4 à
+    exporter est exactement celui de la validation (chemin, SHA-256, taille) ; sa provenance `render.py`
+    est toujours vérifiable ; le rapport de contrôle fourni est celui inscrit dans la validation 4.
+    """
+    from lib.studio.checkpoints import verify_studio_checkpoints
+    from lib.studio.render import RenderError, render_provenance
+    from lib.studio.validations import is_current, validations_by_kind
+
+    problems = verify_studio_checkpoints(project_dir)
+    if problems:
+        return False, "checkpoints Studio non fiables (" + " ; ".join(problems) + ")"
+    ok, why = is_current(project_dir, "rendu")
+    if not ok:
+        return False, f"validation 4 (rendu vidéo) absente ou périmée : {why}"
+    v4 = validations_by_kind(project_dir)["rendu"]
+    if video.resolve() != (project_dir / str(v4.get("fichier"))).resolve():
+        return False, "le MP4 à exporter n'est pas celui de la validation 4"
+    if video.stat().st_size != v4.get("taille_octets") or _sha(video) != v4.get("sha256"):
+        return False, "le MP4 à exporter n'a pas l'empreinte SHA-256 de la validation 4"
+    try:
+        render_provenance(project_dir, str(v4.get("version_rendu")))
+    except RenderError as exc:
+        return False, f"provenance du rendu invérifiable : {exc}"
+    report = (project_dir / "controle" / str(v4.get("version_controle")) / "rapport_qc.json").resolve()
+    if Path(qc_result.data["rapport_json"]).resolve() != report:
+        return False, "le contrôle qualité fourni n'est pas celui de la validation 4"
+    return True, "validation 4 à jour sur le MP4 exact"
+
+
 def _exporter(qc_result, video: Path, title: str, project_dir: Path, options: dict) -> ToolResult:
     from tools.publishers.export_bundle import ExportBundle
 
@@ -93,6 +128,9 @@ def _exporter(qc_result, video: Path, title: str, project_dir: Path, options: di
             return _refus(str(exc))
 
     ok, reason = verify_publication(qc_result, video, studio_root=project_dir)
+    if not ok:
+        return _refus(reason)
+    ok, reason = _final_validation_covers(project_dir, video, qc_result)
     if not ok:
         return _refus(reason)
     expected = json.loads(Path(qc_result.data["rapport_json"]).read_text(encoding="utf-8"))["mp4"]["sha256"]
