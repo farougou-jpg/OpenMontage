@@ -295,6 +295,366 @@ def test_mark_studio_project_never_creates_identity(tmp_path):
     assert list(bare.iterdir()) == []
 
 
+# ---- P0-A : enregistrement Backlot ----
+
+def studio_files(p: Path) -> dict[str, bytes]:
+    return {n: (p / n).read_bytes() for n in ("studio_project.json", "validations.json")}
+
+
+def dirs_of(root: Path) -> set[str]:
+    return {d.relative_to(root).as_posix() for d in root.rglob("*") if d.is_dir()}
+
+
+def backlot_layout(tmp_path: Path) -> set[str]:
+    """Arborescence de référence : ce que lib.checkpoint.init_project crée réellement (jamais recopiée)."""
+    from lib.checkpoint import init_project
+    return dirs_of(init_project("reference", title="R", pipeline_type="studio-fr",
+                                pipeline_dir=tmp_path / "reference"))
+
+
+def test_register_with_backlot_aligns_identities(tmp_path):
+    p = new_project(tmp_path)
+    before = studio_files(p)
+    assert prj.register_with_backlot(p) == p.resolve()
+    marker = json.loads((p / "project.json").read_text(encoding="utf-8"))
+    meta = json.loads((p / "studio_project.json").read_text(encoding="utf-8"))
+    assert marker["project_id"] == p.name and marker["pipeline_type"] == "studio-fr"
+    assert marker["title"] == meta["titre"] and marker["created_at"] == meta["cree_le"]
+    assert dirs_of(p) == backlot_layout(tmp_path)           # arborescence = celle d'init_project
+    assert studio_files(p) == before                      # identité Studio intacte
+    assert prj.require_writable(p) == p.resolve()
+    assert not list(p.glob("checkpoint_*.json"))          # aucun checkpoint créé
+
+
+def test_register_with_backlot_is_idempotent(tmp_path):
+    p = new_project(tmp_path)
+    prj.register_with_backlot(p)
+    first = (p / "project.json").read_bytes()
+    created = json.loads(first)["created_at"]
+    prj.register_with_backlot(p)
+    assert (p / "project.json").read_bytes() == first
+    assert json.loads((p / "project.json").read_bytes())["created_at"] == created
+
+
+def test_register_refused_on_locked_or_unidentified_projects_without_writing(tmp_path):
+    for target in (PILOT, PROJECTS_ROOT / "demos" / "fr-series"):
+        before = tree(target)
+        with pytest.raises(prj.ProjectLockedError):
+            prj.register_with_backlot(target)
+        assert tree(target) == before
+        assert not (target / "project.json").exists()
+    exported, _ = rendered_and_validated(tmp_path)
+    exp.export_package(exported, "film.mp4", "Projet test")
+    before = tree(exported)
+    with pytest.raises(prj.ProjectLockedError, match="exporté"):
+        prj.register_with_backlot(exported)
+    assert tree(exported) == before and not (exported / "project.json").exists()
+    bare = tmp_path / "projects" / "sans-identite"
+    bare.mkdir(parents=True)
+    with pytest.raises(prj.ProjectLockedError):
+        prj.register_with_backlot(bare)
+    assert list(bare.iterdir()) == []
+
+
+@pytest.mark.parametrize("field,value", [("created_at", "2000-01-01T00:00:00+00:00"),
+                                         ("project_id", "autre-projet"), ("pipeline_type", "explainer"),
+                                         ("title", "Autre titre")])
+def test_register_never_overwrites_contradictory_project_json(tmp_path, field, value):
+    p = new_project(tmp_path)
+    meta = json.loads((p / "studio_project.json").read_text(encoding="utf-8"))
+    marker = {"version": "1.0", "project_id": p.name, "title": meta["titre"], "pipeline_type": "studio-fr",
+              "created_at": meta["cree_le"], field: value}
+    (p / "project.json").write_bytes(json.dumps(marker).encode("utf-8"))
+    before = tree(p)
+    with pytest.raises(prj.ProjectError, match=f"contradictoire \\({field}\\)"):
+        prj.register_with_backlot(p)
+    assert tree(p) == before and not (p / "artifacts").exists()
+
+
+@pytest.mark.parametrize("raw", [b"{bad", b"[]", b"\xff\xfe"])
+def test_register_refuses_unreadable_project_json(tmp_path, raw):
+    p = new_project(tmp_path)
+    (p / "project.json").write_bytes(raw)
+    with pytest.raises(prj.ProjectError, match="jamais réinitialisé"):
+        prj.register_with_backlot(p)
+    assert (p / "project.json").read_bytes() == raw and not (p / "artifacts").exists()
+
+
+def test_register_refuses_inconsistent_studio_identity(tmp_path):
+    p = new_project(tmp_path)
+    meta = json.loads((p / "studio_project.json").read_text(encoding="utf-8"))
+    prj.write_json(p / "studio_project.json", {k: v for k, v in meta.items() if k != "cree_le"})
+    with pytest.raises(prj.ProjectError, match="cree_le"):
+        prj.register_with_backlot(p)
+    prj.write_json(p / "studio_project.json", meta)
+    vals = json.loads((p / "validations.json").read_text(encoding="utf-8"))
+    prj.write_json(p / "validations.json", {**vals, "titre": "Titre divergent"})
+    with pytest.raises(prj.ProjectError, match="validations.json"):
+        prj.register_with_backlot(p)
+    assert not (p / "project.json").exists()
+
+
+def _failing_init(real, *, corrupt_marker: bool):
+    """init_project qui crée réellement le dossier, puis échoue (après avoir abîmé le marqueur)."""
+    def fail(project_id, *, title, pipeline_type, pipeline_dir=None, style_playbook=None, series=None):
+        real(project_id, title=title, pipeline_type=pipeline_type, pipeline_dir=pipeline_dir)
+        if corrupt_marker:
+            (Path(pipeline_dir) / project_id / "project.json").write_bytes(b"{tronque")
+        raise RuntimeError("échec simulé d'init_project")
+    return fail
+
+
+def test_register_rollback_when_init_project_fails_on_new_project(tmp_path, monkeypatch):
+    import lib.checkpoint as ckpt
+    p = new_project(tmp_path)
+    before = tree(p)
+    dirs_before = sorted(x.relative_to(p).as_posix() for x in p.rglob("*") if x.is_dir())
+    monkeypatch.setattr(ckpt, "init_project", _failing_init(ckpt.init_project, corrupt_marker=True))
+    with pytest.raises(RuntimeError, match="échec simulé"):
+        prj.register_with_backlot(p)
+    assert tree(p) == before                               # aucun project.json partiel
+    assert sorted(x.relative_to(p).as_posix() for x in p.rglob("*") if x.is_dir()) == dirs_before
+    assert prj.require_writable(p) == p.resolve()          # projet Studio intact, réessayable
+    monkeypatch.undo()
+    prj.register_with_backlot(p)
+    assert json.loads((p / "project.json").read_bytes())["project_id"] == p.name
+
+
+def test_register_rollback_restores_previous_marker_and_keeps_existing_files(tmp_path, monkeypatch):
+    import lib.checkpoint as ckpt
+    layout = backlot_layout(tmp_path)                      # référence calculée avant la simulation
+    p = new_project(tmp_path)
+    prj.register_with_backlot(p)
+    (p / "renders" / "note.txt").write_bytes(b"fichier existant")
+    before = tree(p)
+    monkeypatch.setattr(ckpt, "init_project", _failing_init(ckpt.init_project, corrupt_marker=True))
+    with pytest.raises(RuntimeError):
+        prj.register_with_backlot(p)
+    assert tree(p) == before                               # marqueur restauré octet pour octet
+    assert layout <= dirs_of(p)                            # dossiers préexistants conservés
+
+
+def test_register_rollback_when_marker_inconsistent_after_init(tmp_path, monkeypatch):
+    import lib.checkpoint as ckpt
+    real = ckpt.init_project
+    p = new_project(tmp_path)
+    before = tree(p)
+
+    def drifting(project_id, *, title, pipeline_type, pipeline_dir=None, style_playbook=None, series=None):
+        out = real(project_id, title=title, pipeline_type=pipeline_type, pipeline_dir=pipeline_dir)
+        m = Path(pipeline_dir) / project_id / "project.json"
+        m.write_text(json.dumps({**json.loads(m.read_text(encoding="utf-8")), "created_at": "autre"}),
+                     encoding="utf-8")
+        return out
+    monkeypatch.setattr(ckpt, "init_project", drifting)
+    with pytest.raises(prj.ProjectError, match="incohérent"):
+        prj.register_with_backlot(p)
+    assert tree(p) == before and not (p / "artifacts").exists()
+
+
+def test_rollback_removes_what_init_created_without_hardcoded_layout(tmp_path, monkeypatch):
+    """D3 : le retour arrière constate les dossiers créés (même inconnus), sans liste recopiée."""
+    import lib.checkpoint as ckpt
+    real = ckpt.init_project
+    p = new_project(tmp_path)
+    (p / "assets" / "narration").mkdir(parents=True)          # préexistant : doit rester
+    (p / "assets" / "narration" / "garder.txt").write_bytes(b"x")
+    before, dirs_before = tree(p), dirs_of(p)
+
+    def init_with_new_layout(project_id, *, title, pipeline_type, pipeline_dir=None, style_playbook=None,
+                             series=None):
+        real(project_id, title=title, pipeline_type=pipeline_type, pipeline_dir=pipeline_dir)
+        (Path(pipeline_dir) / project_id / "futur" / "dossier").mkdir(parents=True)   # évolution simulée
+        raise RuntimeError("échec simulé")
+    monkeypatch.setattr(ckpt, "init_project", init_with_new_layout)
+    with pytest.raises(RuntimeError, match="échec simulé"):
+        prj.register_with_backlot(p)
+    assert dirs_of(p) == dirs_before and tree(p) == before
+    assert not hasattr(prj, "BACKLOT_LAYOUT_DIRS")
+
+
+def test_rollback_failure_on_new_marker_is_reported_and_original_kept(tmp_path, monkeypatch):
+    """D1 : project.json créé par l'appel mais impossible à retirer → erreur explicite, origine identifiable."""
+    import lib.checkpoint as ckpt
+    p = new_project(tmp_path)
+    monkeypatch.setattr(ckpt, "init_project", _failing_init(ckpt.init_project, corrupt_marker=False))
+    real_unlink = Path.unlink
+
+    def locked_unlink(self, *a, **k):
+        if self.name == "project.json":
+            raise PermissionError("fichier verrouillé (simulé)")
+        return real_unlink(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", locked_unlink)
+    with pytest.raises(prj.RegistrationRollbackError, match="retour arrière incomplet") as info:
+        prj.register_with_backlot(p)
+    err = info.value
+    assert isinstance(err.original, RuntimeError) and "échec simulé" in str(err.original)
+    assert err.__cause__ is err.original and "RuntimeError" in str(err)
+    assert any("n'a pas pu être retiré" in pb for pb in err.problems)
+    assert isinstance(err, prj.ProjectError)                  # jamais un succès
+    monkeypatch.undo()
+    # Reprise : un nouvel appel refait la vérification complète avant d'accepter.
+    prj.register_with_backlot(p)
+    assert dirs_of(p) == backlot_layout(tmp_path)
+
+
+def test_rollback_failure_on_existing_marker_never_presented_as_valid(tmp_path, monkeypatch):
+    """D1 : marqueur préexistant abîmé et non restaurable → erreur explicite ; ensuite refus « illisible »."""
+    import lib.checkpoint as ckpt
+    p = new_project(tmp_path)
+    prj.register_with_backlot(p)
+    monkeypatch.setattr(ckpt, "init_project", _failing_init(ckpt.init_project, corrupt_marker=True))
+
+    def no_write(*_a, **_k):
+        raise OSError("disque en lecture seule (simulé)")
+    monkeypatch.setattr(prj, "_atomic_write_bytes", no_write)
+    with pytest.raises(prj.RegistrationRollbackError) as info:
+        prj.register_with_backlot(p)
+    assert isinstance(info.value.original, RuntimeError)
+    assert any("restauration de project.json impossible" in pb for pb in info.value.problems)
+    monkeypatch.undo()
+    with pytest.raises(prj.ProjectError, match="illisible"):  # état abîmé : jamais accepté
+        prj.register_with_backlot(p)
+
+
+def test_leftover_dirs_are_noted_without_changing_the_original_error(tmp_path, monkeypatch):
+    import lib.checkpoint as ckpt
+    p = new_project(tmp_path)
+    monkeypatch.setattr(ckpt, "init_project", _failing_init(ckpt.init_project, corrupt_marker=False))
+    real_rmdir = Path.rmdir
+
+    def busy_rmdir(self):
+        if self.name == "renders":
+            raise PermissionError("dossier occupé (simulé)")
+        return real_rmdir(self)
+    monkeypatch.setattr(Path, "rmdir", busy_rmdir)
+    with pytest.raises(RuntimeError, match="échec simulé") as info:   # type d'origine conservé
+        prj.register_with_backlot(p)
+    assert any("renders" in n for n in getattr(info.value, "__notes__", []))
+    assert not (p / "project.json").exists()                 # marqueur bien retiré
+
+
+def test_interruption_is_never_converted_even_if_rollback_fails(tmp_path, monkeypatch):
+    import lib.checkpoint as ckpt
+    real = ckpt.init_project
+    p = new_project(tmp_path)
+
+    def interrupted(project_id, *, title, pipeline_type, pipeline_dir=None, style_playbook=None, series=None):
+        real(project_id, title=title, pipeline_type=pipeline_type, pipeline_dir=pipeline_dir)
+        raise KeyboardInterrupt("arrêt demandé")
+    monkeypatch.setattr(ckpt, "init_project", interrupted)
+    monkeypatch.setattr(prj, "_rollback_registration", lambda *a, **k: (["project.json non retiré"], []))
+    with pytest.raises(KeyboardInterrupt) as info:
+        prj.register_with_backlot(p)
+    assert any("Retour arrière incomplet" in n for n in info.value.__notes__)
+
+
+def test_create_project_refuses_folder_initialised_by_backlot_first(tmp_path):
+    from lib.checkpoint import init_project
+    init_project("ordre-inverse", title="T", pipeline_type="studio-fr", pipeline_dir=tmp_path / "projects")
+    with pytest.raises(prj.ProjectError, match="existe déjà"):
+        prj.create_project("ordre-inverse", "T", "I", 15, root=tmp_path / "projects")
+
+
+# ---- P0-A : écriture du scénario ----
+
+def test_write_script_persists_lf_and_returns_exact_artifact(tmp_path):
+    p = new_project(tmp_path)
+    res = prj.write_script(p, SCRIPT)
+    raw = (p / "script.json").read_bytes()
+    assert b"\r\n" not in raw and json.loads(raw.decode("utf-8")) == res["artefact"] == SCRIPT
+    assert res["sha256"] == sha(p / "script.json") and res["sections"] == 2
+    assert res["modifie"] is True and res["validation_scenario_perimee"] is False
+    res["artefact"]["title"] = "modifié"                      # copie : le fichier ne bouge pas
+    assert json.loads((p / "script.json").read_bytes())["title"] == SCRIPT["title"]
+    assert not list(p.glob("checkpoint_*.json")) and not (p / "project.json").exists()
+    assert "scenario" not in val.validations_by_kind(p)       # aucune validation simulée
+
+
+def test_write_script_rejects_invalid_content_without_writing(tmp_path):
+    p = new_project(tmp_path)
+    with pytest.raises(prj.ProjectError, match="schéma"):
+        prj.write_script(p, {k: v for k, v in SCRIPT.items() if k != "sections"})
+    with pytest.raises(prj.ProjectError, match="Durée du scénario"):
+        prj.write_script(p, {**SCRIPT, "total_duration_seconds": 30})
+    (tmp_path / "illisible.json").write_bytes(b"{bad")
+    with pytest.raises(prj.ProjectError, match="illisible"):
+        prj.write_script(p, tmp_path / "illisible.json")
+    assert not (p / "script.json").exists()
+
+
+def test_write_script_identical_content_is_not_rewritten(tmp_path):
+    p = new_project(tmp_path)
+    prj.write_script(p, SCRIPT)
+    os.utime(p / "script.json", (1_000_000, 1_000_000))
+    raw = (p / "script.json").read_bytes()
+    res = prj.write_script(p, json.loads(json.dumps(SCRIPT)))
+    assert res["modifie"] is False and res["validation_scenario_perimee"] is False
+    assert (p / "script.json").read_bytes() == raw and (p / "script.json").stat().st_mtime == 1_000_000
+
+
+def test_write_script_failure_never_destroys_previous_script(tmp_path, monkeypatch):
+    p = new_project(tmp_path)
+    prj.write_script(p, SCRIPT)
+    before = (p / "script.json").read_bytes()
+
+    def broken_replace(*_a, **_k):
+        raise OSError("disque plein (simulé)")
+    monkeypatch.setattr(prj.os, "replace", broken_replace)
+    changed = {**SCRIPT, "title": "Version 2"}
+    with pytest.raises(OSError, match="disque plein"):
+        prj.write_script(p, changed)
+    assert (p / "script.json").read_bytes() == before
+    assert not list(p.glob(".script.json.*.tmp"))            # aucun fichier temporaire laissé
+
+
+def test_script_change_after_validation_1_invalidates_it(tmp_path):
+    p = new_project(tmp_path)
+    prj.write_script(p, SCRIPT)
+    val.validate_script(p)
+    add_storyboard(p)
+    changed = json.loads(json.dumps(SCRIPT))
+    changed["sections"][0]["text"] = "Beaucoup trop de réunions."
+    res = prj.write_script(p, changed)
+    assert res["modifie"] is True and res["validation_scenario_perimee"] is True
+    assert val.is_current(p, "scenario")[0] is False
+    assert prj.project_state(p)["etapes"]["scenario"]["a_jour"] is False
+    with pytest.raises(val.ValidationError, match="modifié depuis la validation 1"):
+        val.validate_storyboard(p, "v001")
+    e = val.validate_script(p)                                # nouvelle validation explicite
+    assert e["remplace"] == 1 and val.is_current(p, "scenario")[0] is True
+    assert val.validate_storyboard(p, "v001")["numero"] == 3
+
+
+@pytest.mark.parametrize("stage", ["storyboard", "narration", "rendu"])
+def test_validations_2_3_4_forbid_script_rewrite(tmp_path, stage):
+    if stage == "rendu":
+        p, _ = rendered_and_validated(tmp_path)
+    elif stage == "narration":
+        p, _ = validated_until_narration(tmp_path)
+    else:
+        p = new_project(tmp_path)
+        add_script(p); val.validate_script(p); add_storyboard(p); val.validate_storyboard(p, "v001")
+    assert stage in val.validations_by_kind(p)
+    before = tree(p)
+    with pytest.raises(prj.ProjectError, match="déjà validée"):
+        prj.write_script(p, {**SCRIPT, "title": "Réécriture interdite"})
+    assert tree(p) == before
+
+
+def test_write_script_refused_on_locked_or_unidentified_projects(tmp_path):
+    for target in (PILOT, PROJECTS_ROOT / "demos" / "fr-series"):
+        before = tree(target)
+        with pytest.raises(prj.ProjectLockedError):
+            prj.write_script(target, SCRIPT)
+        assert tree(target) == before
+    bare = tmp_path / "projects" / "sans-identite"
+    bare.mkdir(parents=True)
+    with pytest.raises(prj.ProjectLockedError):
+        prj.write_script(bare, SCRIPT)
+    assert list(bare.iterdir()) == []
+
+
 # ---- validations ----
 
 def test_validation_order_enforced(tmp_path):
