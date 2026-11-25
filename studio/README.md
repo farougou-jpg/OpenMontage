@@ -22,7 +22,8 @@ toute génération.
 | Recherche web | Désactivée par défaut, sur demande explicite seulement |
 | Narration | Piper `fr_FR-siwis-medium`, méthode V2 (`lib/studio/narration`, `studio/docs/narration-fr.md`) |
 | Format / durées | 16:9 1920×1080 ; 15, 30, 60 ou 90 s (9:16 et 1:1 au lot 1.4) |
-| Fichiers protégés | `projects/demos/`, `public/audio/fr-series/`, `public/audio/fr-pilot/` |
+| Fichiers protégés | `projects/demos/`, `projects/pilote-gestion-temps/`, `public/audio/fr-series/`, `public/audio/fr-pilot/`, `public/audio/studio/pilote-gestion-temps/` |
+| Validations | Sur l'artefact exact présenté : empreinte SHA-256 + citation de l'accord explicite (`lib/studio/validations.py`) |
 
 ## Feuille de route
 

@@ -54,6 +54,24 @@ def no_real_process(monkeypatch):
     monkeypatch.setattr(ren.subprocess, "run", refuse)
 
 
+# ---- validation humaine (protocole P0-B) ----
+
+ACCORD = "Oui, je valide ce contenu."
+
+
+def approve(p: Path, kind: str, accord: str = ACCORD, **refs) -> dict:
+    """Présente l'artefact (empreinte), puis le valide avec l'accord explicite cité — protocole P0-B."""
+    shown = val.presentation(p, kind, **refs)
+    common = {"empreinte_presentee": shown["empreinte"], "accord_utilisateur": accord}
+    if kind == "scenario":
+        return val.validate_script(p, **common)
+    if kind == "storyboard":
+        return val.validate_storyboard(p, refs["version"], **common)
+    if kind == "narration":
+        return val.validate_narration(p, refs["version"], refs["studio_audio_root"], **common)
+    return val.validate_render(p, refs["render_version"], refs["qc_version"], **common)
+
+
 # ---- projet de test complet (dans tmp_path) ----
 
 def new_project(tmp_path: Path, slug: str = "projet-test") -> Path:
@@ -114,9 +132,9 @@ def add_qc_report(p: Path, render_version: str, qc_version: str = "v001", confor
 
 def validated_until_narration(tmp_path: Path) -> tuple[Path, Path]:
     p, audio = new_project(tmp_path), tmp_path / "audio_studio"
-    add_script(p); val.validate_script(p)
-    add_storyboard(p); val.validate_storyboard(p, "v001")
-    add_narration(p, audio); val.validate_narration(p, "v001", studio_audio_root=audio)
+    add_script(p); approve(p, "scenario")
+    add_storyboard(p); approve(p, "storyboard", version="v001")
+    add_narration(p, audio); approve(p, "narration", version="v001", studio_audio_root=audio)
     return p, audio
 
 
@@ -125,7 +143,7 @@ def rendered_and_validated(tmp_path: Path) -> tuple[Path, Path]:
     plan = ren.prepare_render(p, studio_audio_root=audio)
     ren.run_render(plan, runner=fake_runner())
     add_qc_report(p, "v001")
-    val.validate_render(p, "v001", "v001")
+    approve(p, "rendu", render_version="v001", qc_version="v001")
     return p, audio
 
 
@@ -197,7 +215,7 @@ def test_pilot_and_french_videos_locked_and_read_only():
     assert "pilote-gestion-temps" in [s["projet"] for s in prj.list_projects()]
     assert not [s for s in prj.list_projects() if s["projet"] == "demos"]
     with pytest.raises(prj.ProjectLockedError):
-        val.validate_script(PILOT)
+        approve(PILOT, "scenario")
     with pytest.raises(prj.ProjectLockedError):
         exp.export_package(PILOT, "x.mp4", "T")
     assert tree(PILOT) == before
@@ -611,7 +629,7 @@ def test_write_script_failure_never_destroys_previous_script(tmp_path, monkeypat
 def test_script_change_after_validation_1_invalidates_it(tmp_path):
     p = new_project(tmp_path)
     prj.write_script(p, SCRIPT)
-    val.validate_script(p)
+    approve(p, "scenario")
     add_storyboard(p)
     changed = json.loads(json.dumps(SCRIPT))
     changed["sections"][0]["text"] = "Beaucoup trop de réunions."
@@ -620,10 +638,10 @@ def test_script_change_after_validation_1_invalidates_it(tmp_path):
     assert val.is_current(p, "scenario")[0] is False
     assert prj.project_state(p)["etapes"]["scenario"]["a_jour"] is False
     with pytest.raises(val.ValidationError, match="modifié depuis la validation 1"):
-        val.validate_storyboard(p, "v001")
-    e = val.validate_script(p)                                # nouvelle validation explicite
+        approve(p, "storyboard", version="v001")
+    e = approve(p, "scenario")                                # nouvelle validation explicite
     assert e["remplace"] == 1 and val.is_current(p, "scenario")[0] is True
-    assert val.validate_storyboard(p, "v001")["numero"] == 3
+    assert approve(p, "storyboard", version="v001")["numero"] == 3
 
 
 @pytest.mark.parametrize("stage", ["storyboard", "narration", "rendu"])
@@ -634,7 +652,7 @@ def test_validations_2_3_4_forbid_script_rewrite(tmp_path, stage):
         p, _ = validated_until_narration(tmp_path)
     else:
         p = new_project(tmp_path)
-        add_script(p); val.validate_script(p); add_storyboard(p); val.validate_storyboard(p, "v001")
+        add_script(p); approve(p, "scenario"); add_storyboard(p); approve(p, "storyboard", version="v001")
     assert stage in val.validations_by_kind(p)
     before = tree(p)
     with pytest.raises(prj.ProjectError, match="déjà validée"):
@@ -661,60 +679,60 @@ def test_validation_order_enforced(tmp_path):
     p, audio = new_project(tmp_path), tmp_path / "a"
     add_script(p); add_storyboard(p); add_narration(p, audio)
     with pytest.raises(val.ValidationError, match="scénario non validé"):
-        val.validate_storyboard(p, "v001")
-    val.validate_script(p)
+        approve(p, "storyboard", version="v001")
+    approve(p, "scenario")
     with pytest.raises(val.ValidationError, match="storyboard non validé"):
-        val.validate_narration(p, "v001", studio_audio_root=audio)
+        approve(p, "narration", version="v001", studio_audio_root=audio)
     with pytest.raises(val.ValidationError, match="introuvable"):
-        val.validate_storyboard(p, "v009")
-    e = val.validate_storyboard(p, "v001")
+        approve(p, "storyboard", version="v009")
+    e = approve(p, "storyboard", version="v001")
     assert e["numero"] == 2 and e["type"] == "storyboard" and e["configuration_rendu"] == FR_CONFIG_V4
     assert "storyboard/v001/scenes/scene_01.png" in e["empreintes"]
 
 
 def test_modified_file_invalidates_next_steps(tmp_path):
     p, audio = new_project(tmp_path), tmp_path / "a"
-    add_script(p); val.validate_script(p); add_storyboard(p)
+    add_script(p); approve(p, "scenario"); add_storyboard(p)
     (p / "script.json").write_bytes((p / "script.json").read_bytes() + b" ")
     assert val.is_current(p, "scenario")[0] is False
     with pytest.raises(val.ValidationError, match="modifié depuis la validation 1"):
-        val.validate_storyboard(p, "v001")
+        approve(p, "storyboard", version="v001")
 
 
 def test_revalidation_rules(tmp_path):
     p, audio = validated_until_narration(tmp_path)
     with pytest.raises(val.ValidationError, match="déjà validée"):
-        val.validate_storyboard(p, "v001")                       # narration déjà validée après lui
+        approve(p, "storyboard", version="v001")                       # narration déjà validée après lui
     add_narration(p, audio, "v002")
-    e = val.validate_narration(p, "v002", studio_audio_root=audio)
+    e = approve(p, "narration", version="v002", studio_audio_root=audio)
     assert e["remplace"] == 3 and val.validations_by_kind(p)["narration"]["version"] == "v002"
     assert len(val.load(p)["validations"]) == 4                  # l'ancienne entrée est conservée
 
 
 def test_narration_refusals(tmp_path):
     p, audio = new_project(tmp_path), tmp_path / "a"
-    add_script(p); val.validate_script(p); add_storyboard(p); val.validate_storyboard(p, "v001")
+    add_script(p); approve(p, "scenario"); add_storyboard(p); approve(p, "storyboard", version="v001")
     add_narration(p, audio, conforme=False)
     with pytest.raises(val.ValidationError, match="non conforme"):
-        val.validate_narration(p, "v001", studio_audio_root=audio)
+        approve(p, "narration", version="v001", studio_audio_root=audio)
     add_narration(p, audio, "v002")
     (audio / p.name / "v002" / "narration_fr.wav").write_bytes(b"autre")
     with pytest.raises(val.ValidationError, match="Copie pour Remotion"):
-        val.validate_narration(p, "v002", studio_audio_root=audio)
+        approve(p, "narration", version="v002", studio_audio_root=audio)
 
 
 def test_storyboard_unknown_config_refused(tmp_path):
     p = new_project(tmp_path)
-    add_script(p); val.validate_script(p); add_storyboard(p, config="remotion.config.ts")
+    add_script(p); approve(p, "scenario"); add_storyboard(p, config="remotion.config.ts")
     with pytest.raises(val.ValidationError, match="Configuration de rendu inconnue"):
-        val.validate_storyboard(p, "v001")
+        approve(p, "storyboard", version="v001")
 
 
 def test_crlf_preserved(tmp_path):
     p = new_project(tmp_path)
     f = p / "validations.json"
     f.write_bytes(f.read_bytes().replace(b"\n", b"\r\n"))
-    add_script(p); val.validate_script(p)
+    add_script(p); approve(p, "scenario")
     raw = f.read_bytes()
     assert raw.count(b"\r\n") == raw.count(b"\n") > 0
 
@@ -876,6 +894,6 @@ def test_export_requires_render_validation(tmp_path):
     ren.run_render(ren.prepare_render(p, studio_audio_root=audio), runner=fake_runner())
     add_qc_report(p, "v001", conforme=False)
     with pytest.raises(val.ValidationError, match="non conforme"):
-        val.validate_render(p, "v001", "v001")
+        approve(p, "rendu", render_version="v001", qc_version="v001")
     with pytest.raises(exp.ExportError, match="rendu vidéo non validé"):
         exp.export_package(p, "ok.mp4", "T")

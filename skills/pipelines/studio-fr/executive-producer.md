@@ -37,6 +37,51 @@ français, étape par étape, avec les validations humaines prévues.
    `projects/<projet>/` et `remotion-composer/public/audio/studio/<projet>/`.
 8. **Échec = arrêt.** Un contrôle bloquant qui échoue arrête l'étape ; on explique, on
    propose une correction (ex. reformuler une phrase), on ne force jamais.
+9. **Validation = artefact exact.** Une validation humaine porte sur le contenu exact
+   présenté à l'utilisateur, prouvé par son empreinte SHA-256 et par la citation de son
+   accord (voir « Validations humaines » ci-dessous). Ne jamais valider à sa place.
+
+## Initialisation du projet Studio (fin de l'étape `idea`)
+
+Ordre imposé, une seule fois, AVANT le premier checkpoint :
+
+```python
+from lib.studio import project as prj
+project_dir = prj.create_project(slug, titre, idee, duree_s)   # dossier neuf, identité Studio
+prj.register_with_backlot(project_dir)                         # project.json aligné (Backlot)
+```
+
+puis `python -m backlot open <slug>` (non bloquant). Seulement ensuite :
+`write_checkpoint(..., pipeline_type="studio-fr")`. Pour ce pipeline,
+`register_with_backlot` remplace l'appel direct à `init_project` (elle l'appelle elle-même,
+avec les identités alignées) : ne jamais appeler `init_project` ni `write_checkpoint` avant
+`create_project`, ni sur `projects/demos/` ou `projects/pilote-gestion-temps/`.
+
+## Validations humaines : l'artefact exact (règle absolue)
+
+| Étape | Validation | Présentation | Enregistrement |
+|---|---|---|---|
+| `script` | Validation 1 | `val.presentation(project_dir, "scenario")` | `val.validate_script(...)` |
+| `scene_plan` | Validation 2 | `val.presentation(project_dir, "storyboard", version="vNNN")` | `val.validate_storyboard(..., "vNNN", ...)` |
+
+(`from lib.studio import validations as val`.) Pour chaque validation :
+
+1. Produire l'artefact final, puis calculer son empreinte (lecture seule) :
+   `shown = val.presentation(...)`.
+2. Présenter exactement ces fichiers (`shown["fichiers"]`) et indiquer l'empreinte
+   `shown["empreinte"]`. Fin du tour : attendre la réponse de l'utilisateur.
+3. Seul un accord explicite compte. Silence, réponse ambiguë, accord donné sur une autre
+   question ou « continue » sans objet : ce n'est pas un accord.
+4. Accord explicite reçu → valider aussitôt, sans aucune écriture intermédiaire :
+   `empreinte_presentee=shown["empreinte"]`,
+   `accord_utilisateur="<mots exacts de l'utilisateur, sans reformulation>"`.
+5. Refus « pas exactement celui présenté » : ne jamais recalculer l'empreinte pour forcer ;
+   présenter de nouveau l'artefact actuel et redemander l'accord.
+6. Écrire le checkpoint `completed` avec `human_approved=True` seulement après une
+   validation réussie ; l'artefact du checkpoint est celui qui a été validé.
+
+Toute modification après validation la rend caduque (`is_current` la refuse ; l'étape
+suivante aussi) : il faut présenter le nouvel artefact et obtenir un nouvel accord.
 
 ## Déroulé
 

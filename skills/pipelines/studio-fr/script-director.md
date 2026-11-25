@@ -35,12 +35,42 @@ res = StudioBudgetGuard(project_dir).run(PiperFrNarration(), {
 Chaque section doit avoir `tient: true`. Sinon : reformuler, puis mesurer à nouveau.
 Le mode `mesure` n'écrit qu'un rapport JSON de durées.
 
+## Enregistrer le scénario final
+
+Une fois les mesures conformes, enregistrer la version finale (seule voie d'écriture de
+`script.json` : schéma vérifié, durée du projet vérifiée, écriture atomique) :
+
+```python
+from lib.studio import project as prj
+res = prj.write_script(project_dir, script)
+```
+
+`res["artefact"]` est exactement le contenu enregistré : c'est lui, et lui seul, qui est
+présenté puis repris tel quel dans le checkpoint.
+
 ## Validation 1 — ce que tu présentes
+
+```python
+from lib.studio import validations as val
+shown = val.presentation(project_dir, "scenario")   # empreinte de script.json tel qu'il est
+```
 
 1. Tableau de **tous les textes à l'écran**, scène par scène.
 2. **Narration complète**, telle qu'écrite et telle qu'elle sera lue (texte normalisé).
 3. Durées mesurées, débit (syllabes/s), marge avant chaque fondu.
 4. Avertissements du rapport (accord incertain, mot étranger…).
+5. L'empreinte `shown["empreinte"]` du scénario présenté.
 
 Attendre l'accord explicite de l'utilisateur. Aucune narration définitive avant.
+Accord explicite reçu → valider immédiatement, sans réécrire le scénario entre-temps :
+
+```python
+val.validate_script(project_dir, empreinte_presentee=shown["empreinte"],
+                    accord_utilisateur="<mots exacts de l'utilisateur>")
+```
+
+Puis checkpoint `script` (`completed`, `human_approved=True`) avec `res["artefact"]`.
+Si l'utilisateur demande une modification : `write_script`, nouvelle présentation,
+nouvel accord. Après la validation 2 (storyboard), le scénario n'est plus modifiable dans
+ce projet (`write_script` refuse).
 L'artefact produit est conforme à `schemas/artifacts/script.schema.json`.

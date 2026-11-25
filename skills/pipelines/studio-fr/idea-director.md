@@ -29,6 +29,19 @@ simple phrase) en `brief` (`schemas/artifacts/brief.schema.json`).
 5. **Produire le `brief`** en français : idée reformulée, objectif, public, ton, type,
    durée, format 16:9, contraintes (0 €, phase 1, local), éléments imposés par
    l'utilisateur (citations exactes de ses mots).
+6. **Créer le projet Studio**, dans cet ordre et avant tout checkpoint (voir
+   `executive-producer`, « Initialisation du projet Studio ») :
+
+   ```python
+   from lib.studio import project as prj
+   project_dir = prj.create_project(slug, titre, idee, duree_s)
+   prj.register_with_backlot(project_dir)
+   ```
+
+   puis `python -m backlot open <slug>` (non bloquant), puis le checkpoint `idea`.
+   Identifiant : minuscules, chiffres et tirets, 3 à 61 caractères, dérivé du titre.
+   Si le projet existe déjà, ne rien écraser : demander à l'utilisateur s'il faut le
+   reprendre ou en créer un autre.
 
 ## Ce que tu présentes
 

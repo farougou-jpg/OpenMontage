@@ -60,3 +60,17 @@ La planche (`planche.png`) et la page `storyboard.html`, plus ce tableau :
 Avec le style, le format 1920×1080, la méthode de composition et le moteur. Attendre
 l'accord explicite de l'utilisateur avant toute génération audio ou vidéo. L'artefact produit est
 conforme à `schemas/artifacts/scene_plan.schema.json`.
+
+Empreinte du storyboard présenté (tous les fichiers de `storyboard/vNNN/`), calculée avant
+la présentation, puis validation 2 dès l'accord explicite, sans rien régénérer entre-temps :
+
+```python
+from lib.studio import validations as val
+shown = val.presentation(project_dir, "storyboard", version="vNNN")
+# … présentation, accord explicite de l'utilisateur …
+val.validate_storyboard(project_dir, "vNNN", empreinte_presentee=shown["empreinte"],
+                        accord_utilisateur="<mots exacts de l'utilisateur>")
+```
+
+Un nouveau rendu du storyboard crée une nouvelle version `vNNN` : la présenter et obtenir
+un nouvel accord ; l'empreinte d'une autre version est refusée.
