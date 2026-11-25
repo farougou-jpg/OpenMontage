@@ -56,6 +56,10 @@ puis `python -m backlot open <slug>` (non bloquant). Seulement ensuite :
 `register_with_backlot` remplace l'appel direct à `init_project` (elle l'appelle elle-même,
 avec les identités alignées) : ne jamais appeler `init_project` ni `write_checkpoint` avant
 `create_project`, ni sur `projects/demos/` ou `projects/pilote-gestion-temps/`.
+Lot P0-C : tout checkpoint `studio-fr` s'écrit exclusivement via
+`ckp.write_studio_checkpoint(project_dir, étape, statut, artefacts, ...)`
+(`from lib.studio import checkpoints as ckp`), qui vérifie puis appelle `write_checkpoint` ;
+jamais d'appel direct (un tel checkpoint n'a pas de trace d'intégrité et bloque la suite).
 
 ## Validations humaines : l'artefact exact (règle absolue)
 
@@ -63,6 +67,7 @@ avec les identités alignées) : ne jamais appeler `init_project` ni `write_chec
 |---|---|---|---|
 | `script` | Validation 1 | `val.presentation(project_dir, "scenario")` | `val.validate_script(...)` |
 | `scene_plan` | Validation 2 | `val.presentation(project_dir, "storyboard", version="vNNN")` | `val.validate_storyboard(..., "vNNN", ...)` |
+| `assets` | Validation 3 | `val.presentation(project_dir, "narration", version="vNNN")` | `val.validate_narration(..., "vNNN", ...)` |
 
 (`from lib.studio import validations as val`.) Pour chaque validation :
 
@@ -95,6 +100,13 @@ suivante aussi) : il faut présenter le nouvel artefact et obtenir un nouvel acc
 | `edit` | `pipelines/explainer/edit-director` + règles ci-dessous | — | — |
 | `compose` | `pipelines/explainer/compose-director` + règles ci-dessous | Rapport de rendu | — |
 | `publish` | `pipelines/studio-fr/publish-director` | MP4 + rapport de contrôle qualité (`QualityControlTool` obligatoire ; publication refusée si non conforme) ; export uniquement via `exporter_video` | ✅ Validation finale |
+
+Lot P0-C (prime sur les lignes `assets`, `edit`, `compose` et `publish` ci-dessus) :
+`assets` porte la validation 3 (accord explicite exigé au checkpoint) ; `edit` suit
+`pipelines/studio-fr/edit-director` (coupes du storyboard validé, aucune nouvelle coupe) ;
+`compose` suit `pipelines/studio-fr/compose-director` (rendu exclusivement par
+`lib/studio/render.py`) ; `publish` est gelée pour le studio jusqu'au lot P0-D : aucun export,
+et `write_studio_checkpoint` refuse tout checkpoint `publish`.
 
 Lis chaque skill d'étape AVANT de travailler dans l'étape (Rule Zero d'AGENT_GUIDE.md) et
 écris un checkpoint à la fin de chaque étape (`skills/meta/checkpoint-protocol.md`).

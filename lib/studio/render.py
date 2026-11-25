@@ -122,6 +122,50 @@ def run_render(plan: RenderPlan, runner: Optional[Runner] = None, on_line: Calla
         raise
 
 
+def render_provenance(project_dir: Path, render_version: str) -> dict:
+    """Prouve qu'un rendu `renders/vNNN` vient de `run_render`, sur les validations 2 et 3 actuelles (P0-C).
+
+    Exige, sinon `RenderError` : manifeste `rendu.json` ; un seul MP4, celui du manifeste, avec la même
+    empreinte SHA-256 et la même taille ; versions du storyboard et de la narration égales aux validations
+    2 et 3, toutes deux à jour ; configuration de rendu du storyboard validé ; `props_rendu.json` égal aux
+    props du storyboard validé augmentées de la piste de la narration validée. Lecture seule.
+    """
+    p = Path(project_dir)
+    from lib.studio.project import versions
+    if render_version not in versions(p / "renders"):
+        raise RenderError(f"Rendu introuvable : renders/{render_version}.")
+    r = p / "renders" / render_version
+    info = read_json(r / "rendu.json")
+    if not isinstance(info, dict):
+        raise RenderError("Provenance invérifiable : rendu.json absent (MP4 non produit par render.py).")
+    mp4s = sorted(f.name for f in r.glob("*.mp4"))
+    if info.get("mp4") != OUTPUT_NAME or mp4s != [OUTPUT_NAME]:
+        raise RenderError(f"Provenance invérifiable : un seul MP4 attendu ({OUTPUT_NAME}), trouvé(s) : {mp4s}.")
+    mp4 = r / OUTPUT_NAME
+    if info.get("sha256") != sha256(mp4) or info.get("taille_octets") != mp4.stat().st_size:
+        raise RenderError("Provenance invérifiable : le MP4 ne correspond plus au manifeste rendu.json.")
+    for kind in ("storyboard", "narration"):
+        ok, why = is_current(p, kind)
+        if not ok:
+            raise RenderError(f"Provenance invérifiable : {why}.")
+    vals = validations_by_kind(p)
+    sb_v, nar_v = vals["storyboard"].get("version"), vals["narration"].get("version")
+    if info.get("storyboard") != sb_v or info.get("narration") != nar_v:
+        raise RenderError(f"Rendu produit sur storyboard {info.get('storyboard')} / narration {info.get('narration')}, "
+                          f"validés : {sb_v} / {nar_v}.")
+    if info.get("configuration_rendu") != vals["storyboard"].get("configuration_rendu"):
+        raise RenderError("Configuration de rendu différente de celle du storyboard validé.")
+    audio_src = f"audio/studio/{p.name}/{nar_v}/narration_fr.wav"
+    expected = read_json(p / "storyboard" / sb_v / "props_storyboard.json")
+    if not isinstance(expected, dict) or info.get("audio") != audio_src:
+        raise RenderError("Props du storyboard validé illisibles ou piste audio inattendue.")
+    expected = {**expected, "audio": {"narration": {"src": audio_src, "volume": 1.0}}}
+    if read_json(r / "props_rendu.json") != expected:
+        raise RenderError("props_rendu.json ne correspond pas au storyboard et à la narration validés.")
+    return {"version": render_version, "mp4": str(mp4), "sha256": info["sha256"], "taille_octets": info["taille_octets"],
+            "storyboard": sb_v, "narration": nar_v}
+
+
 def check_render(project_dir: Path, render_version: str, tool: Any = None, title: Optional[str] = None) -> Any:
     """Contrôle qualité automatique du rendu (outil du lot 1.6, via le garde-fou). Renvoie le ToolResult."""
     from lib.studio.qc import QualityControlTool
@@ -140,4 +184,4 @@ def check_render(project_dir: Path, render_version: str, tool: Any = None, title
 
 
 __all__ = ["RenderError", "RenderPlan", "ValidationError", "check_render", "prepare_render", "render_command",
-           "run_render"]
+           "render_provenance", "run_render"]

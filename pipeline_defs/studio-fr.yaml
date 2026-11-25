@@ -25,8 +25,8 @@ required_skills:
   - pipelines/studio-fr/script-director
   - pipelines/studio-fr/scene-director
   - pipelines/studio-fr/asset-director
-  - pipelines/explainer/edit-director
-  - pipelines/explainer/compose-director
+  - pipelines/studio-fr/edit-director
+  - pipelines/studio-fr/compose-director
   - pipelines/studio-fr/publish-director
   - meta/reviewer
   - meta/checkpoint-protocol
@@ -148,7 +148,7 @@ stages:
       - Schema-valid asset_manifest, coût total 0
 
   - name: edit
-    skill: pipelines/explainer/edit-director
+    skill: pipelines/studio-fr/edit-director
     required_artifacts_in:
       - asset_manifest
       - scene_plan
@@ -163,18 +163,13 @@ stages:
       - Schema-valid edit_decisions
 
   - name: compose
-    skill: pipelines/explainer/compose-director
+    skill: pipelines/studio-fr/compose-director
     required_artifacts_in:
       - edit_decisions
       - asset_manifest
     produces:
       - render_report
-    tools_available:
-      - video_compose
-      - hyperframes_compose
-      - audio_mixer
-      - subtitle_gen
-      - remotion_caption_burn
+    tools_available:   # rendu exclusivement par lib/studio/render.py (hors registre) ; analyse seulement ici
       - composition_validator
       - visual_qa
       - audio_probe
@@ -182,7 +177,8 @@ stages:
     checkpoint_required: true
     human_approval_default: false
     review_focus:
-      - Rendu 1920x1080 avec remotion.fr-locale-v4.config.ts (gabarits)
+      - Rendu 1920x1080 avec remotion.fr-locale-v4.config.ts (gabarits), par lib/studio/render.py uniquement
+      - Provenance du MP4 vérifiée (rendu.json, validations 2 et 3 à jour)
       - Contrôle qualité visuel et sonore
     success_criteria:
       - Schema-valid render_report, MP4 1920x1080

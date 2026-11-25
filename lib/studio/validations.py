@@ -194,6 +194,12 @@ def _collect_narration(p: Path, version: str, studio_audio_root: Path) -> tuple[
 def _collect_render(p: Path, render_version: str, qc_version: str) -> tuple[dict, list[Path]]:
     r = _version_dir(p / "renders", render_version)
     q = _version_dir(p / "controle", qc_version)
+    # P0-C : le MP4 doit provenir de render.py, sur les validations 2 et 3 actuelles (import local : cycle).
+    from lib.studio.render import RenderError, render_provenance
+    try:
+        render_provenance(p, render_version)
+    except RenderError as exc:
+        raise ValidationError(f"Rendu non validable : {exc}") from exc
     mp4s = sorted(r.glob("*.mp4"))
     if len(mp4s) != 1:
         raise ValidationError(f"Rendu {render_version} : un seul MP4 attendu ({len(mp4s)} trouvé(s)).")

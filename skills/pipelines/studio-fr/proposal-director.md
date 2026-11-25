@@ -31,6 +31,10 @@ production, et obtenir l'accord de l'utilisateur. Appliquer
    qu'il apporte à CE projet, une phrase sur sa limite, puis ta recommandation. Le
    champ `render_runtime` du `proposal_packet` (`remotion` ou `hyperframes`) n'est
    rempli qu'après accord ; la décision `render_runtime_selection` liste les deux.
+   **Phase 1 du studio** : seul le rendu Remotion par gabarits (`lib/studio/render.py`) est
+   exécutable. HyperFrames et la méthode atelier sont présentés avec ce statut
+   (« indisponible au rendu en phase 1 »), comme le mode hybride, et jamais engagés ;
+   `render_runtime` vaut donc `remotion`.
 6. **Musique** : aucune en phase 1 (Pixabay arrive en phase 2). Le dire et consigner
    `music_source`.
 7. **Devis** — calculé par le garde-fou, sans rien exécuter :
